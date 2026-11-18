@@ -1,0 +1,1296 @@
+/* ============================================================================
+   SillyTavern 扩展：信笺 · 初晴 | 外置向量记忆库 (RAG)
+   视觉规范：延续「信笺 · 初晴」暖米纸张色盘、𝔖 印章、大标题水印与电影票打孔 Toast
+   作用域说明：所有变量与选择器均采用 --cqst-* / #cqst-* / .cqst-* 隔离前缀，
+              避免与酒馆原生样式或其它美化主题发生冲突。
+   ============================================================================ */
+
+:root {
+    --cqst-brown-light: #8c7b70;
+    --cqst-rgb-brown-light: 140, 123, 112;
+    --cqst-brown-dark: #5d4e46;
+    --cqst-rgb-brown-dark: 93, 78, 70;
+
+    --cqst-blue-grey: #8e9eab;
+    --cqst-rgb-blue-grey: 142, 158, 171;
+    --cqst-blue-dark: #5d6e7f;
+    --cqst-bot-text: #556677;
+
+    --cqst-red: #d9534f;
+    --cqst-red-dark: #c9302c;
+    --cqst-green: #4caf50;
+    --cqst-rgb-green: 76, 175, 80;
+    --cqst-yellow: #ff9800;
+    --cqst-yellow-dark: #f57c00;
+
+    --cqst-bg-paper: #eee6de;
+    --cqst-rgb-bg-paper: 238, 230, 222;
+    --cqst-bg-light: #fdfbf7;
+    --cqst-rgb-bg-light: 253, 251, 247;
+    --cqst-bg-input: #faf9f6;
+
+    --cqst-text-main: #4a3e38;
+    --cqst-rgb-text-main: 74, 62, 56;
+    --cqst-text-strong: #5d4e46;
+    --cqst-text-light: #666666;
+    --cqst-text-faded: #888888;
+    --cqst-border: #bfaea0;
+
+    --cqst-card-bg: rgba(255, 255, 255, 0.88);
+    --cqst-surface-hover: #ffffff;
+    --cqst-recall-bg: rgba(255, 255, 255, 0.75);
+    --cqst-primary-fg: #ffffff;
+    --cqst-danger-hover-bg: #fff5f5;
+    --cqst-green-text: #2e7d32;
+
+    --cqst-font-serif: 'Playfair Display', 'Noto Serif SC', 'Source Han Serif SC', 'Microsoft YaHei', serif;
+    --cqst-font-sans: 'Lato', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, sans-serif;
+    --cqst-font-mono: 'Courier Prime', 'Consolas', monospace;
+
+    --cqst-shadow-sm: 0 2px 5px rgba(0, 0, 0, 0.06);
+    --cqst-shadow-md: 3px 5px 16px rgba(0, 0, 0, 0.14);
+    --cqst-shadow-lg: 0 12px 34px rgba(0, 0, 0, 0.22);
+    --cqst-ease-bounce: cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+/* 「信笺 · 星夜」夜间配色覆盖 (SillyTavern Night Palette) */
+html[data-cqst-theme="night"] {
+    --cqst-brown-light: #a69487;
+    --cqst-rgb-brown-light: 166, 148, 135;
+    --cqst-brown-dark: #ccbcaf;
+    --cqst-rgb-brown-dark: 204, 188, 175;
+
+    --cqst-blue-grey: #8a9ba8;
+    --cqst-rgb-blue-grey: 138, 155, 168;
+    --cqst-blue-dark: #b1c6d6;
+    --cqst-bot-text: #a8b8c7;
+
+    --cqst-red: #d9534f;
+    --cqst-red-dark: #e86c68;
+
+    --cqst-bg-paper: #2d2a27;
+    --cqst-rgb-bg-paper: 45, 42, 39;
+    --cqst-bg-light: #24211f;
+    --cqst-rgb-bg-light: 36, 33, 31;
+    --cqst-bg-input: #322f2c;
+
+    --cqst-text-main: #e0d8ce;
+    --cqst-rgb-text-main: 224, 216, 206;
+    --cqst-text-strong: #ccbcaf;
+    --cqst-text-light: #a39b94;
+    --cqst-text-faded: #827c76;
+    --cqst-border: #57504b;
+
+    --cqst-card-bg: rgba(56, 52, 49, 0.9);
+    --cqst-surface-hover: #383431;
+    --cqst-recall-bg: rgba(40, 39, 41, 0.88);
+    --cqst-primary-fg: #24211f;
+    --cqst-danger-hover-bg: rgba(217, 83, 79, 0.16);
+    --cqst-green-text: #81c784;
+
+    --cqst-shadow-sm: 0 2px 5px rgba(0, 0, 0, 0.3);
+    --cqst-shadow-md: 3px 5px 15px rgba(0, 0, 0, 0.4);
+    --cqst-shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes cqst-slide-down {
+    0% { opacity: 0; transform: translateY(-8px); }
+    100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes cqst-checkbox-pop {
+    0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; }
+    100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+}
+
+@keyframes cqst-box-flash {
+    0% { box-shadow: 0 0 0 1.5px rgba(var(--cqst-rgb-text-main), 1); }
+    100% { box-shadow: 0 0 0 1.5px rgba(var(--cqst-rgb-text-main), 0.3); }
+}
+
+@keyframes cqst-spread-once {
+    0% { letter-spacing: 1px; opacity: 0; transform: scale(0.95); }
+    100% { letter-spacing: 5px; opacity: 1; transform: scale(1); }
+}
+
+@keyframes cqst-text-flash {
+    0% { opacity: 1; }
+    100% { opacity: 0.55; }
+}
+
+/* ============================================================================
+   1. 电影票打孔遮罩 Toast
+   ============================================================================ */
+#cqst-toast-wrap {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 9900;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: none;
+}
+
+.cqst-toast {
+    pointer-events: auto;
+    position: relative;
+    width: 330px;
+    max-width: calc(100vw - 28px);
+    padding: 11px 14px 13px 60px;
+    background-color: var(--cqst-bg-light);
+    color: var(--cqst-text-strong);
+    border-radius: 6px;
+    box-shadow: var(--cqst-shadow-md);
+    font-family: var(--cqst-font-sans);
+    animation: cqst-slide-down 0.25s ease-out;
+    cursor: pointer;
+    box-sizing: border-box;
+    -webkit-mask-image:
+        radial-gradient(circle at 46px 0, transparent 6px, black 6.5px),
+        radial-gradient(circle at 46px 100%, transparent 6px, black 6.5px),
+        linear-gradient(black, black);
+    mask-image:
+        radial-gradient(circle at 46px 0, transparent 6px, black 6.5px),
+        radial-gradient(circle at 46px 100%, transparent 6px, black 6.5px),
+        linear-gradient(black, black);
+    -webkit-mask-composite: destination-out, destination-out, source-over;
+    mask-composite: exclude;
+}
+
+.cqst-toast::before {
+    content: "✦";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 46px;
+    background: var(--cqst-green);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 700;
+    border-right: 2px dashed rgba(255, 255, 255, 0.55);
+}
+
+.cqst-toast::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 46px;
+    border: 1px dashed rgba(var(--cqst-rgb-brown-dark), 0.42);
+    border-left: none;
+    border-radius: 0 6px 6px 0;
+    pointer-events: none;
+}
+
+.cqst-toast.warn::before { background: var(--cqst-yellow); content: "!"; }
+.cqst-toast.err::before { background: var(--cqst-red); content: "×"; }
+.cqst-toast.info::before { background: var(--cqst-blue-dark); content: "◈"; }
+
+.cqst-toast-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    line-height: 1.25;
+    margin-bottom: 2px;
+    color: var(--cqst-text-strong);
+}
+
+.cqst-toast.warn .cqst-toast-title { color: var(--cqst-yellow-dark); }
+.cqst-toast.err .cqst-toast-title { color: var(--cqst-red); }
+.cqst-toast.info .cqst-toast-title { color: var(--cqst-blue-dark); }
+
+.cqst-toast-msg {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--cqst-text-main);
+    opacity: 0.88;
+    word-break: break-word;
+}
+
+/* ============================================================================
+   2. LOADING SCENE 呼吸线框遮罩
+   ============================================================================ */
+#cqst-loading-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(var(--cqst-rgb-bg-paper), 0.62);
+    backdrop-filter: blur(3px);
+    z-index: 9800;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+}
+
+#cqst-loading-backdrop.open {
+    display: flex;
+}
+
+.cqst-loading-box {
+    min-width: 240px;
+    height: 66px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(var(--cqst-rgb-bg-light), 0.94);
+    box-shadow: 0 0 0 1.5px var(--cqst-text-main);
+    animation: cqst-box-flash 2s infinite alternate;
+    padding: 0 24px;
+}
+
+.cqst-loading-box::after {
+    content: attr(data-text);
+    font-family: var(--cqst-font-serif);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--cqst-text-main);
+    text-transform: uppercase;
+    animation:
+        cqst-spread-once 0.5s ease forwards,
+        cqst-text-flash 1.5s ease-in-out infinite alternate;
+}
+
+.cqst-loading-sub {
+    font-family: var(--cqst-font-mono);
+    font-size: 12px;
+    color: var(--cqst-text-strong);
+    text-align: center;
+    padding: 0 16px;
+}
+
+/* ============================================================================
+   3. 顶部栏原生下拉全景页 (#cqst-top-drawer & #cqst-top-drawer-content)
+   ============================================================================ */
+#cqst-top-drawer-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    height: 100%;
+}
+
+#cqst-top-drawer-content.closedDrawer,
+#cqst-top-drawer-content:not(.openDrawer) {
+    display: none !important;
+}
+
+#cqst-top-drawer-content.openDrawer {
+    display: flex !important;
+}
+
+#cqst-top-drawer-content {
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    gap: 12px !important;
+    transition: none !important;
+    background: rgba(var(--cqst-rgb-bg-light), 0.97) !important;
+    color: var(--cqst-text-main) !important;
+    border: 1px solid rgba(var(--cqst-rgb-brown-light), 0.3) !important;
+    border-radius: 12px;
+    box-shadow: var(--cqst-shadow-lg) !important;
+    padding: 20px 24px 22px 24px !important;
+    font-family: var(--cqst-font-sans);
+    max-height: calc(100dvh - 58px);
+    overflow-y: auto;
+    box-sizing: border-box;
+    pointer-events: auto;
+    z-index: 3500;
+}
+
+#cqst-top-drawer-content *,
+#cqst-panel *,
+.cqst-modal-overlay * {
+    box-sizing: border-box;
+}
+
+/* 初晴大标题与英文水印 (1:1 还原内置下拉页风格) */
+.cqst-hero-header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding-bottom: 18px;
+    margin-bottom: 4px;
+}
+
+.cqst-hero-header::after {
+    content: "❖";
+    font-size: 14px;
+    font-family: var(--cqst-font-serif);
+    color: rgba(var(--cqst-rgb-brown-light), 0.6);
+    position: absolute;
+    bottom: -3px;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    pointer-events: none;
+    background: linear-gradient(
+        to right,
+        transparent 0%,
+        rgba(var(--cqst-rgb-brown-light), 0.25) 15%,
+        rgba(var(--cqst-rgb-brown-light), 0.25) calc(50% - 35px),
+        transparent calc(50% - 12px),
+        transparent calc(50% + 12px),
+        rgba(var(--cqst-rgb-brown-light), 0.25) calc(50% + 35px),
+        rgba(var(--cqst-rgb-brown-light), 0.25) 85%,
+        transparent 100%
+    ) no-repeat center center;
+    background-size: 100% 1px;
+}
+
+.cqst-hero-title {
+    margin: 0;
+    font-family: var(--cqst-font-serif);
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--cqst-text-main);
+    letter-spacing: 1px;
+    position: relative;
+    z-index: 2;
+}
+
+.cqst-hero-title::before {
+    content: "MEMORY ARCHIVE";
+    position: absolute;
+    left: -2px;
+    top: -16px;
+    z-index: -1;
+    font-family: var(--cqst-font-serif);
+    font-size: 40px;
+    font-weight: 700;
+    color: rgba(var(--cqst-rgb-brown-light), 0.08);
+    letter-spacing: -0.5px;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.cqst-hero-title span {
+    background: linear-gradient(to top, rgba(var(--cqst-rgb-brown-light), 0.25) 40%, transparent 40%);
+    padding: 0 4px;
+    border-radius: 2px;
+}
+
+.cqst-hero-title::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    bottom: -7px;
+    width: 20px;
+    height: 3px;
+    background-color: var(--cqst-brown-light);
+    border-radius: 2px;
+}
+
+.cqst-hero-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* 全景导航标签页 */
+.cqst-tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    background: rgba(var(--cqst-rgb-brown-light), 0.11);
+    padding: 4px;
+    border-radius: 50px;
+    border: 1px solid rgba(var(--cqst-rgb-brown-light), 0.22);
+    width: fit-content;
+    max-width: 100%;
+}
+
+.cqst-tab-btn {
+    border: none;
+    background: transparent;
+    padding: 6px 15px;
+    border-radius: 50px;
+    font-family: var(--cqst-font-sans);
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--cqst-text-light);
+    cursor: pointer;
+    transition: all 0.18s ease;
+    white-space: nowrap;
+}
+
+.cqst-tab-btn:hover {
+    color: var(--cqst-text-strong);
+}
+
+.cqst-tab-btn.active {
+    background: var(--cqst-bg-light);
+    color: var(--cqst-text-strong);
+    box-shadow: var(--cqst-shadow-sm);
+}
+
+.cqst-tab-pane {
+    display: none;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.cqst-tab-pane.active {
+    display: flex;
+    animation: cqst-slide-down 0.18s ease-out;
+}
+
+.cqst-panorama-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.15fr;
+    gap: 14px;
+    align-items: start;
+}
+
+.cqst-archive-scroll {
+    max-height: 460px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding-right: 3px;
+}
+
+/* ============================================================================
+   4. 悬浮触发胶囊 (#cqst-floating-pill) 与跟随式精简小面板 (#cqst-panel)
+   ============================================================================ */
+#cqst-floating-pill {
+    position: fixed;
+    right: 20px;
+    bottom: 92px;
+    z-index: 9500;
+    background: var(--cqst-bg-light);
+    color: var(--cqst-text-strong);
+    border: 1.5px solid var(--cqst-border);
+    border-left: 4px solid var(--cqst-brown-light);
+    border-radius: 50px;
+    padding: 7px 13px;
+    box-shadow: var(--cqst-shadow-md);
+    font-family: var(--cqst-font-serif);
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+    touch-action: none;
+    white-space: nowrap;
+    width: max-content;
+    max-width: calc(100vw - 12px);
+    transition: transform 0.24s ease, opacity 0.24s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+#cqst-floating-pill > span {
+    flex-shrink: 0;
+}
+
+#cqst-floating-pill:hover,
+#cqst-floating-pill.cqst-pill-awake {
+    opacity: 1;
+    transform: translateX(0);
+    box-shadow: 0 6px 20px rgba(var(--cqst-rgb-brown-light), 0.34);
+    border-color: var(--cqst-brown-light);
+}
+
+#cqst-floating-pill.dragging {
+    cursor: grabbing;
+    opacity: 0.94;
+    transform: translateX(0);
+}
+
+#cqst-floating-pill.cqst-dock-left:not(:hover):not(.dragging):not(.cqst-pill-awake) {
+    opacity: 0.46;
+    transform: translateX(calc(-100% + 48px));
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}
+
+#cqst-floating-pill.cqst-dock-right:not(:hover):not(.dragging):not(.cqst-pill-awake) {
+    opacity: 0.46;
+    transform: translateX(calc(100% - 76px));
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+#cqst-floating-pill.hidden {
+    display: none !important;
+}
+
+.cqst-pill-branch {
+    font-family: var(--cqst-font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    opacity: 0.8;
+    max-width: 115px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cqst-pill-count {
+    font-family: var(--cqst-font-mono);
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 50px;
+    background: rgba(var(--cqst-rgb-brown-light), 0.16);
+    color: var(--cqst-text-strong);
+}
+
+/* 跟随悬浮球定位的精简快捷窗 */
+#cqst-panel {
+    position: fixed;
+    left: 20px;
+    top: 100px;
+    width: 356px;
+    max-width: calc(100vw - 20px);
+    max-height: 540px;
+    overflow-y: auto;
+    z-index: 9510;
+    background: rgba(var(--cqst-rgb-bg-light), 0.97);
+    border: 1px solid rgba(var(--cqst-rgb-brown-light), 0.35);
+    border-radius: 10px;
+    box-shadow: var(--cqst-shadow-lg);
+    padding: 12px 14px;
+    font-family: var(--cqst-font-sans);
+    color: var(--cqst-text-main);
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    box-sizing: border-box;
+    animation: cqst-slide-down 0.18s ease-out;
+}
+
+#cqst-panel.open {
+    display: flex;
+}
+
+.cqst-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid var(--cqst-border);
+    padding-bottom: 8px;
+}
+
+.cqst-panel-title {
+    font-family: var(--cqst-font-serif);
+    font-size: 14.5px;
+    font-weight: 700;
+    color: var(--cqst-text-strong);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* ============================================================================
+   5. 通用初晴卡片、按钮、表单控件 (强制覆盖主题对 number/text/select 的样式)
+   ============================================================================ */
+.cqst-card {
+    background: var(--cqst-card-bg);
+    border: 1px solid rgba(var(--cqst-rgb-brown-light), 0.22);
+    border-radius: 7px;
+    border-left: 3px solid var(--cqst-brown-light);
+    padding: 10px 12px;
+    box-shadow: var(--cqst-shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.cqst-card.bot-accent {
+    border-left-color: var(--cqst-blue-grey);
+}
+
+.cqst-scrape-config-box {
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    background: var(--cqst-bg-input);
+    border: 1px dashed var(--cqst-border);
+    border-radius: 6px;
+}
+
+.cqst-scrape-config-box.open {
+    display: flex;
+}
+
+.cqst-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.cqst-row-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.cqst-storage-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(var(--cqst-rgb-bg-light), 0.78);
+    border: 1px dashed var(--cqst-border);
+    border-radius: 6px;
+    font-size: 11.5px;
+}
+
+.cqst-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--cqst-font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 50px;
+    background: rgba(var(--cqst-rgb-brown-light), 0.14);
+    color: var(--cqst-text-strong);
+    white-space: nowrap;
+}
+
+.cqst-status-pill.github {
+    background: rgba(var(--cqst-rgb-blue-grey), 0.18);
+    color: var(--cqst-blue-dark);
+}
+
+.cqst-status-pill.custom {
+    background: rgba(var(--cqst-rgb-green), 0.15);
+    color: var(--cqst-green-text);
+}
+
+.cqst-btn {
+    height: 30px;
+    padding: 0 11px;
+    border-radius: 6px;
+    border: 1px solid var(--cqst-border);
+    background: var(--cqst-bg-light);
+    color: var(--cqst-text-strong);
+    font-family: var(--cqst-font-sans);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    white-space: nowrap;
+    transition: all 0.18s ease;
+}
+
+.cqst-btn:hover:not(:disabled) {
+    border-color: var(--cqst-brown-light);
+    background: var(--cqst-surface-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(var(--cqst-rgb-brown-light), 0.18);
+}
+
+.cqst-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.cqst-btn.sm {
+    height: 25px;
+    padding: 0 8px;
+    font-size: 11.5px;
+}
+
+.cqst-btn.icon-only {
+    width: 30px;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.cqst-btn.primary {
+    background: var(--cqst-brown-light);
+    color: var(--cqst-primary-fg);
+    border-color: var(--cqst-brown-light);
+}
+
+.cqst-btn.primary:hover:not(:disabled) {
+    background: var(--cqst-brown-dark);
+    border-color: var(--cqst-brown-dark);
+    color: var(--cqst-primary-fg);
+}
+
+.cqst-btn.bot {
+    background: rgba(var(--cqst-rgb-blue-grey), 0.18);
+    color: var(--cqst-bot-text);
+    border-color: var(--cqst-blue-grey);
+}
+
+.cqst-btn.bot:hover:not(:disabled) {
+    background: var(--cqst-blue-grey);
+    color: var(--cqst-primary-fg);
+}
+
+.cqst-btn.danger {
+    color: var(--cqst-red);
+    border-color: rgba(217, 83, 79, 0.45);
+}
+
+.cqst-btn.danger:hover:not(:disabled) {
+    background: var(--cqst-danger-hover-bg);
+    border-color: var(--cqst-red);
+}
+
+.cqst-link-btn {
+    border: none;
+    background: transparent;
+    padding: 2px 6px;
+    font-family: var(--cqst-font-mono);
+    font-size: 11.5px;
+    color: var(--cqst-text-light);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.cqst-link-btn:hover {
+    color: var(--cqst-text-strong);
+    background: rgba(var(--cqst-rgb-brown-light), 0.13);
+}
+
+/* 统一输入控件尺寸与圆角，彻底消除与初晴主题下划线 input[type=number] 的高低错位 */
+body input.cqst-input,
+body input[type="number"].cqst-input,
+body input[type="text"].cqst-input,
+body input[type="password"].cqst-input,
+body select.cqst-select,
+body .drawer-content input.cqst-input,
+body .drawer-content input[type="number"].cqst-input,
+body .drawer-content input[type="text"].cqst-input,
+body .drawer-content input[type="password"].cqst-input,
+body .drawer-content select.cqst-select {
+    width: 100%;
+    height: 32px !important;
+    min-height: 32px !important;
+    margin: 0 !important;
+    padding: 4px 10px !important;
+    background: var(--cqst-bg-input) !important;
+    border: 1px solid var(--cqst-border) !important;
+    border-radius: 5px !important;
+    font-family: var(--cqst-font-sans) !important;
+    font-size: 12.5px !important;
+    font-weight: 500 !important;
+    color: var(--cqst-text-main) !important;
+    line-height: 1.4 !important;
+    text-align: left !important;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03) !important;
+    box-sizing: border-box !important;
+    vertical-align: middle !important;
+    transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+body input[type="number"].cqst-input,
+body .drawer-content input[type="number"].cqst-input {
+    text-align: center !important;
+    font-family: var(--cqst-font-mono) !important;
+    font-weight: 700 !important;
+    padding: 4px 6px !important;
+}
+
+body textarea.cqst-textarea,
+body .drawer-content textarea.cqst-textarea {
+    width: 100%;
+    margin: 0 !important;
+    padding: 7px 10px !important;
+    background: var(--cqst-bg-input) !important;
+    border: 1px solid var(--cqst-border) !important;
+    border-radius: 5px !important;
+    font-family: var(--cqst-font-sans) !important;
+    font-size: 12.5px !important;
+    color: var(--cqst-text-main) !important;
+    line-height: 1.55 !important;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03) !important;
+    resize: vertical;
+    box-sizing: border-box !important;
+}
+
+body .cqst-input:focus,
+body .cqst-select:focus,
+body .cqst-textarea:focus,
+body .drawer-content .cqst-input:focus,
+body .drawer-content .cqst-select:focus,
+body .drawer-content .cqst-textarea:focus {
+    outline: none !important;
+    border-color: var(--cqst-brown-light) !important;
+    background: var(--cqst-surface-hover) !important;
+}
+
+body .cqst-input.compact-h,
+body .cqst-select.compact-h,
+body .drawer-content .cqst-input.compact-h,
+body .drawer-content .cqst-select.compact-h {
+    height: 25px !important;
+    min-height: 25px !important;
+    padding: 2px 7px !important;
+    font-size: 11.5px !important;
+}
+
+/* 𝔖 火漆印章复选框 */
+input[type="checkbox"].cqst-checkbox {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    position: relative;
+    width: 17px !important;
+    height: 17px !important;
+    min-width: 17px;
+    border-radius: 4px;
+    background-color: var(--cqst-bg-light) !important;
+    border: 1px solid var(--cqst-border) !important;
+    cursor: pointer;
+    margin: 0;
+    flex-shrink: 0;
+    transition: all 0.18s ease;
+}
+
+input[type="checkbox"].cqst-checkbox:hover {
+    border-color: var(--cqst-brown-light) !important;
+}
+
+input[type="checkbox"].cqst-checkbox:checked {
+    border-color: var(--cqst-brown-light) !important;
+    background-color: var(--cqst-surface-hover) !important;
+}
+
+input[type="checkbox"].cqst-checkbox:checked::after {
+    content: '𝔖';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 12px;
+    line-height: 1;
+    color: var(--cqst-brown-light);
+    animation: cqst-checkbox-pop 0.2s var(--cqst-ease-bounce);
+}
+
+/* 标签胶囊 */
+.cqst-tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.cqst-tag {
+    font-size: 11.5px;
+    padding: 2px 9px;
+    border-radius: 50px;
+    background: rgba(var(--cqst-rgb-brown-light), 0.1);
+    border: 1px solid rgba(var(--cqst-rgb-brown-light), 0.3);
+    color: var(--cqst-text-strong);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.15s ease;
+}
+
+.cqst-tag:hover {
+    border-color: var(--cqst-brown-light);
+    background: rgba(var(--cqst-rgb-brown-light), 0.16);
+}
+
+.cqst-tag.active {
+    background: rgba(var(--cqst-rgb-brown-light), 0.24);
+    border-color: var(--cqst-brown-dark);
+    font-weight: 700;
+}
+
+.cqst-tag.active::before {
+    content: "𝔖 ";
+}
+
+.cqst-tag.cqst-tag-add {
+    border-style: dashed;
+    background: transparent;
+    color: var(--cqst-brown-light);
+    font-weight: 700;
+}
+
+.cqst-tag.cqst-tag-add:hover {
+    background: rgba(var(--cqst-rgb-brown-light), 0.12);
+    color: var(--cqst-text-strong);
+}
+
+.cqst-compartment-box {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 9px;
+    background: var(--cqst-bg-input);
+    border: 1px solid var(--cqst-border);
+    border-radius: 6px;
+}
+
+.cqst-compartment-name {
+    font-family: var(--cqst-font-serif);
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--cqst-text-strong);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cqst-recall-preview {
+    max-height: 145px;
+    overflow-y: auto;
+    background: var(--cqst-recall-bg);
+    border: 1px dashed var(--cqst-blue-grey);
+    border-radius: 5px;
+    padding: 7px 10px;
+    font-size: 11.5px;
+    color: var(--cqst-text-main);
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.cqst-recall-preview.visible {
+    display: flex;
+}
+
+.cqst-recall-item {
+    padding-bottom: 5px;
+    border-bottom: 1px dashed rgba(var(--cqst-rgb-blue-grey), 0.3);
+}
+
+.cqst-recall-item:last-child {
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.cqst-slice-card {
+    background: var(--cqst-bg-light);
+    border-radius: 6px;
+    border-left: 3px solid var(--cqst-brown-light);
+    padding: 11px 13px;
+    box-shadow: var(--cqst-shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.cqst-slice-card.collapsed {
+    padding: 8px 11px;
+    gap: 4px;
+}
+
+.cqst-slice-card.collapsed .cqst-slice-text {
+    display: none;
+}
+
+.cqst-slice-card.collapsed .cqst-slice-footer {
+    border-top: none;
+    padding-top: 2px;
+}
+
+.cqst-slice-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-family: var(--cqst-font-mono);
+    font-size: 11px;
+    color: var(--cqst-text-faded);
+    cursor: pointer;
+}
+
+.cqst-slice-text {
+    font-size: 13px;
+    line-height: 1.65;
+    color: var(--cqst-text-main);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.cqst-slice-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    border-top: 1px dashed rgba(var(--cqst-rgb-brown-light), 0.25);
+    padding-top: 6px;
+}
+
+.cqst-slice-badge {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 50px;
+    background: rgba(var(--cqst-rgb-brown-light), 0.12);
+    color: var(--cqst-text-strong);
+}
+
+.cqst-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding-top: 6px;
+    border-top: 1px dashed rgba(var(--cqst-rgb-brown-light), 0.24);
+    font-size: 11.5px;
+    color: var(--cqst-text-light);
+}
+
+.cqst-pagination:empty {
+    display: none;
+}
+
+/* ============================================================================
+   6. 弹窗体系 (.cqst-modal-overlay)
+   ============================================================================ */
+.cqst-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.38);
+    backdrop-filter: blur(4px);
+    z-index: 9700;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 14px;
+    font-family: var(--cqst-font-sans);
+}
+
+.cqst-modal-overlay.open {
+    display: flex;
+}
+
+.cqst-modal-card {
+    background: var(--cqst-bg-light);
+    color: var(--cqst-text-main);
+    border: 1px solid var(--cqst-border);
+    border-radius: 8px;
+    box-shadow: var(--cqst-shadow-lg);
+    width: 100%;
+    max-width: 540px;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    animation: cqst-slide-down 0.22s ease-out;
+}
+
+.cqst-modal-header {
+    padding: 14px 18px;
+    border-bottom: 1px solid rgba(var(--cqst-rgb-brown-light), 0.25);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.cqst-modal-title {
+    font-family: var(--cqst-font-serif);
+    font-size: 16.5px;
+    font-weight: 700;
+    color: var(--cqst-text-strong);
+}
+
+.cqst-modal-body {
+    padding: 16px 18px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.cqst-modal-footer {
+    padding: 12px 18px;
+    border-top: 1px solid rgba(var(--cqst-rgb-brown-light), 0.2);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.cqst-form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.cqst-form-grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    align-items: start;
+}
+
+.cqst-form-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--cqst-text-strong);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.cqst-form-hint {
+    font-size: 11.5px;
+    color: var(--cqst-text-faded);
+    line-height: 1.45;
+}
+
+.cqst-divider {
+    border: none;
+    border-top: 1px dashed var(--cqst-border);
+    margin: 2px 0;
+}
+
+.cqst-list-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 9px 11px;
+    background: var(--cqst-bg-input);
+    border: 1px solid var(--cqst-border);
+    border-radius: 6px;
+}
+
+.cqst-st-settings-box {
+    background: rgba(var(--cqst-rgb-bg-light), 0.94);
+    color: var(--cqst-text-main);
+    border: 1px solid var(--cqst-border);
+    border-left: 3px solid var(--cqst-brown-light);
+    border-radius: 6px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-family: var(--cqst-font-sans);
+}
+
+/* ============================================================================
+   7. 滚动条美化（仅作用于插件容器内部）
+   ============================================================================ */
+#cqst-top-drawer-content::-webkit-scrollbar,
+#cqst-panel::-webkit-scrollbar,
+.cqst-archive-scroll::-webkit-scrollbar,
+.cqst-modal-body::-webkit-scrollbar {
+    width: 8px;
+}
+
+#cqst-top-drawer-content::-webkit-scrollbar-thumb,
+#cqst-panel::-webkit-scrollbar-thumb,
+.cqst-archive-scroll::-webkit-scrollbar-thumb,
+.cqst-modal-body::-webkit-scrollbar-thumb {
+    background: rgba(var(--cqst-rgb-brown-light), 0.4);
+    border-radius: 4px;
+}
+
+/* ============================================================================
+   8. 移动端响应式适配
+   ============================================================================ */
+@media (max-width: 820px) {
+    .cqst-panorama-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 680px) {
+    #cqst-top-drawer-content {
+        padding: 14px 12px 16px 12px !important;
+        border-top-left-radius: 0 !important;
+        border-top-right-radius: 0 !important;
+    }
+
+    .cqst-hero-title {
+        font-size: 19px;
+    }
+
+    .cqst-hero-title::before {
+        font-size: 26px;
+        top: -10px;
+    }
+
+    #cqst-floating-pill {
+        width: 44px;
+        height: 44px;
+        padding: 0;
+        border-radius: 50%;
+        border-left-width: 1.5px;
+        border-color: var(--cqst-brown-light);
+        justify-content: center;
+        font-size: 16px;
+        overflow: visible;
+    }
+
+    #cqst-floating-pill.cqst-dock-left:not(:hover):not(.dragging):not(.cqst-pill-awake) {
+        border-radius: 50%;
+        opacity: 0.48;
+        transform: translateX(-44%);
+    }
+
+    #cqst-floating-pill.cqst-dock-right:not(:hover):not(.dragging):not(.cqst-pill-awake) {
+        border-radius: 50%;
+        opacity: 0.48;
+        transform: translateX(44%);
+    }
+
+    #cqst-floating-pill.cqst-dock-right:not(:hover):not(.dragging):not(.cqst-pill-awake) .cqst-pill-count {
+        right: auto;
+        left: -5px;
+    }
+
+    #cqst-floating-pill .cqst-pill-label,
+    #cqst-floating-pill .cqst-pill-branch {
+        display: none;
+    }
+
+    #cqst-floating-pill .cqst-pill-count {
+        position: absolute;
+        top: -5px;
+        right: -5px;
+        min-width: 18px;
+        height: 18px;
+        padding: 0 5px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 1;
+        background: var(--cqst-brown-light);
+        color: var(--cqst-primary-fg);
+        border: 1.5px solid var(--cqst-bg-light);
+        box-shadow: var(--cqst-shadow-sm);
+    }
+
+    .cqst-form-grid-2 {
+        grid-template-columns: 1fr;
+    }
+
+    #cqst-toast-wrap {
+        left: 50%;
+        right: auto;
+        transform: translateX(-50%);
+    }
+}
