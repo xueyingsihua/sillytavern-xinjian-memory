@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.2';
+const PLUGIN_VERSION = '1.0.3';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -2003,7 +2003,7 @@ function mountBaseContainers() {
     panel.innerHTML = `
         <div class="cqst-panel-header">
             <div class="cqst-panel-title">✉️ 信笺 · 随行速控</div>
-            <div style="display:flex;align-items:center;gap:5px;">
+            <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;">
                 <button type="button" class="cqst-btn sm icon-only" id="cqst-mini-hide-pill-btn" title="隐藏悬浮球（防误触，可在顶栏✉️全景页→配置中恢复）">🙈</button>
                 <button type="button" class="cqst-btn sm icon-only" id="cqst-mini-theme-btn" title="切换初晴(日间) / 星夜(夜间)配色">🌙</button>
                 <button type="button" class="cqst-btn sm bot" id="cqst-mini-open-panorama" title="拉开酒馆顶部全景记忆库页面">🏛️ 全景页</button>

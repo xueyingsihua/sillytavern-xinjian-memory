@@ -605,19 +605,21 @@ html[data-cqst-theme="night"] {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
     border-bottom: 1px solid var(--cqst-border);
     padding-bottom: 8px;
 }
 
 .cqst-panel-title {
     font-family: var(--cqst-font-serif);
-    font-size: 14.5px;
+    font-size: 13.5px;
     font-weight: 700;
     color: var(--cqst-text-strong);
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 /* ============================================================================
@@ -758,6 +760,10 @@ html[data-cqst-theme="night"] {
     width: 30px;
     padding: 0;
     flex-shrink: 0;
+}
+
+.cqst-btn.sm.icon-only {
+    width: 25px;
 }
 
 .cqst-btn.primary {
