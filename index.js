@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.3';
+const PLUGIN_VERSION = '1.0.4';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -323,6 +323,54 @@ function showToast(title, message = '', type = 'ok', duration = 3200) {
     }, duration);
 }
 
+function syncFixedOverlayToViewport(overlay) {
+    if (!overlay || !overlay.classList.contains('open')) return;
+    const vv = window.visualViewport;
+    const vw = Math.max(240, Math.ceil(vv?.width || window.innerWidth || document.documentElement.clientWidth || 360));
+    const vh = Math.max(240, Math.ceil(vv?.height || window.innerHeight || document.documentElement.clientHeight || 640));
+    const targetLeft = vv ? vv.offsetLeft : 0;
+    const targetTop = vv ? vv.offsetTop : 0;
+
+    // 先重置为 0 点并锁定可视区宽高，再测量实际坐标差以抵消宿主 transform/滚动导致的固定定位偏移
+    overlay.style.top = '0px';
+    overlay.style.left = '0px';
+    overlay.style.right = 'auto';
+    overlay.style.bottom = 'auto';
+    overlay.style.width = `${vw}px`;
+    overlay.style.height = `${vh}px`;
+    overlay.style.minHeight = `${vh}px`;
+    overlay.style.maxHeight = `${vh}px`;
+
+    const rect = overlay.getBoundingClientRect();
+    const deltaTop = targetTop - rect.top;
+    const deltaLeft = targetLeft - rect.left;
+    if (Math.abs(deltaTop) > 0.5) overlay.style.top = `${Math.round(deltaTop)}px`;
+    if (Math.abs(deltaLeft) > 0.5) overlay.style.left = `${Math.round(deltaLeft)}px`;
+
+    const card = overlay.querySelector('.cqst-modal-card');
+    if (card) {
+        const pad = vw <= 680 ? 20 : 28;
+        card.style.maxHeight = `${Math.max(200, vh - pad)}px`;
+    }
+}
+
+function syncAllOpenOverlays() {
+    const backdrop = document.getElementById('cqst-loading-backdrop');
+    if (backdrop?.classList.contains('open')) syncFixedOverlayToViewport(backdrop);
+    document.querySelectorAll('.cqst-modal-overlay.open').forEach(syncFixedOverlayToViewport);
+}
+
+function openCQModal(modalOrId) {
+    const modal = typeof modalOrId === 'string' ? document.getElementById(modalOrId) : modalOrId;
+    if (!modal) return;
+    modal.classList.add('open');
+    modal.scrollTop = 0;
+    const body = modal.querySelector('.cqst-modal-body');
+    if (body) body.scrollTop = 0;
+    syncFixedOverlayToViewport(modal);
+    requestAnimationFrame(() => syncFixedOverlayToViewport(modal));
+}
+
 function showLoading(sceneText = 'LOADING SCENE', subText = '正在同步记忆与向量...') {
     const backdrop = document.getElementById('cqst-loading-backdrop');
     const box = document.getElementById('cqst-loading-box');
@@ -331,6 +379,8 @@ function showLoading(sceneText = 'LOADING SCENE', subText = '正在同步记忆�
     box.setAttribute('data-text', sceneText);
     sub.textContent = subText;
     backdrop.classList.add('open');
+    syncFixedOverlayToViewport(backdrop);
+    requestAnimationFrame(() => syncFixedOverlayToViewport(backdrop));
 }
 
 function hideLoading() {
@@ -1974,6 +2024,8 @@ function mountBaseContainers() {
     marker.style.display = 'none';
     document.body.appendChild(marker);
 
+    const overlayHost = document.documentElement || document.body;
+
     // Loading 遮罩
     const loadingEl = document.createElement('div');
     loadingEl.id = 'cqst-loading-backdrop';
@@ -1981,7 +2033,7 @@ function mountBaseContainers() {
         <div class="cqst-loading-box" id="cqst-loading-box" data-text="LOADING SCENE"></div>
         <div class="cqst-loading-sub" id="cqst-loading-sub">正在处理记忆向量...</div>
     `;
-    document.body.appendChild(loadingEl);
+    overlayHost.appendChild(loadingEl);
 
     // 悬浮触发胶囊
     const pill = document.createElement('div');
@@ -2108,7 +2160,7 @@ function mountBaseContainers() {
             </div>
         </div>
     `;
-    document.body.appendChild(renameModal);
+    (document.documentElement || document.body).appendChild(renameModal);
 
     // 弹窗 B：单条记忆切片 新增 / 编辑弹窗
     const sliceModal = document.createElement('div');
@@ -2147,7 +2199,7 @@ function mountBaseContainers() {
             </div>
         </div>
     `;
-    document.body.appendChild(sliceModal);
+    (document.documentElement || document.body).appendChild(sliceModal);
 
     // 弹窗 C：隔间专属人设弹窗
     const personaModal = document.createElement('div');
@@ -2171,7 +2223,7 @@ function mountBaseContainers() {
             </div>
         </div>
     `;
-    document.body.appendChild(personaModal);
+    (document.documentElement || document.body).appendChild(personaModal);
 
     // 弹窗 D：自定义标签池管理弹窗
     const tagModal = document.createElement('div');
@@ -2199,7 +2251,7 @@ function mountBaseContainers() {
             </div>
         </div>
     `;
-    document.body.appendChild(tagModal);
+    (document.documentElement || document.body).appendChild(tagModal);
 }
 
 function buildTopDrawerContentHTML() {
@@ -3818,7 +3870,7 @@ async function openRenameModal() {
     document.getElementById('cqst-rename-raw-chat').textContent = state.currentChatIdentity.rawChatId || '(未激活对话)';
     document.getElementById('cqst-rename-input').value = state.currentCompartment;
     await syncRenameInputsUI();
-    modal.classList.add('open');
+    openCQModal(modal);
 }
 
 async function renderBranchManagerList() {
@@ -4050,7 +4102,7 @@ function openSliceModal(slice = null) {
     document.getElementById('cqst-slice-date').value = slice ? (slice.date || getTodayDate()) : getTodayDate();
     document.getElementById('cqst-slice-event').value = slice ? (slice.event || '手动记录') : '手动记录';
     document.getElementById('cqst-slice-tags').value = slice ? (slice.tags || []).join(', ') : Array.from(state.selectedTags).join(', ');
-    document.getElementById('cqst-slice-modal')?.classList.add('open');
+    openCQModal('cqst-slice-modal');
 }
 
 function openPersonaModal(targetBranch = state.currentCompartment) {
@@ -4060,7 +4112,7 @@ function openPersonaModal(targetBranch = state.currentCompartment) {
     modal.setAttribute('data-target-branch', cur);
     document.getElementById('cqst-persona-branch-name').textContent = cur;
     document.getElementById('cqst-persona-input').value = state.globalProfile.branchPersonas?.[cur] || '';
-    modal.classList.add('open');
+    openCQModal(modal);
 }
 
 function renderTagManagerList() {
@@ -4140,7 +4192,7 @@ function renderTagManagerList() {
 
 function openTagModal() {
     renderTagManagerList();
-    document.getElementById('cqst-tag-modal')?.classList.add('open');
+    openCQModal('cqst-tag-modal');
 }
 
 /* ============================================================================
@@ -4309,7 +4361,12 @@ function bindBaseUIEvents() {
     window.addEventListener('resize', () => {
         clampPillIntoViewport();
         if (state.panelOpen) updateMiniPanelPosition();
+        syncAllOpenOverlays();
     });
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', syncAllOpenOverlays);
+        window.visualViewport.addEventListener('scroll', syncAllOpenOverlays);
+    }
 
     // 随行速控小面板事件
     document.getElementById('cqst-btn-close-panel').addEventListener('click', () => togglePanel(false));
