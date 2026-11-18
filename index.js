@@ -16,6 +16,9 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
+const PLUGIN_VERSION = '1.0.1';
+const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
+const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
 const DEFAULT_TAGS = ['核心设定', '日常点滴', '重要事件', '偏好习惯', '约定待办', '剧情进度', '感情升温'];
 
@@ -130,6 +133,7 @@ const state = {
     slicePage: 1,
     slicesCollapsed: false,
     toggledSliceIds: new Set(),
+    updateInfo: { checked: false, hasUpdate: false, remoteVersion: '', error: '' },
     lastRecalledSlices: [],
     stagedManualRecall: null, // { query, compartment, recalled, formattedBlock, chatLen }
     lastArchivedFloorMap: {}, // { [rawChatId]: lastArchivedFloorIndex }
@@ -1982,7 +1986,7 @@ function mountBaseContainers() {
     // 悬浮触发胶囊
     const pill = document.createElement('div');
     pill.id = 'cqst-floating-pill';
-    pill.title = '点击展开精简速控窗（可按住自由拖动，小窗会自动跟随位置）';
+    pill.title = '点击展开速控窗（PC 拖动 / 手机长按拖动，贴边半隐避让手势）';
     pill.innerHTML = `
         <span>✉️<span class="cqst-pill-label"> 信笺</span></span>
         <span class="cqst-pill-branch" id="cqst-pill-branch">[tavern_default]</span>
@@ -2000,6 +2004,7 @@ function mountBaseContainers() {
         <div class="cqst-panel-header">
             <div class="cqst-panel-title">✉️ 信笺 · 随行速控</div>
             <div style="display:flex;align-items:center;gap:5px;">
+                <button type="button" class="cqst-btn sm icon-only" id="cqst-mini-hide-pill-btn" title="隐藏悬浮球（防误触，可在顶栏✉️全景页→配置中恢复）">🙈</button>
                 <button type="button" class="cqst-btn sm icon-only" id="cqst-mini-theme-btn" title="切换初晴(日间) / 星夜(夜间)配色">🌙</button>
                 <button type="button" class="cqst-btn sm bot" id="cqst-mini-open-panorama" title="拉开酒馆顶部全景记忆库页面">🏛️ 全景页</button>
                 <button type="button" class="cqst-btn sm" id="cqst-btn-close-panel">收起</button>
@@ -2204,6 +2209,7 @@ function buildTopDrawerContentHTML() {
                 <span class="cqst-status-pill" id="cqst-top-storage-pill">💾 本地存储</span>
                 <span class="cqst-status-pill" id="cqst-top-comp-pill">🌿 tavern_default</span>
                 <span class="cqst-status-pill" id="cqst-top-depth-pill">🔮 @D0 · System</span>
+                <button type="button" class="cqst-btn sm update-ready" id="cqst-top-update-btn" style="display:none;" title="点击立即从 GitHub 拉取最新扩展版本">🆕 立即更新</button>
                 <button type="button" class="cqst-btn sm" id="cqst-top-theme-btn" title="切换初晴(日间) / 星夜(夜间)配色">🌙 星夜</button>
                 <button type="button" class="cqst-btn sm" id="cqst-top-sync-btn" title="同步最新记忆">↻ 同步</button>
                 <button type="button" class="cqst-btn sm" id="cqst-top-close-btn">✕ 收起</button>
@@ -2212,9 +2218,9 @@ function buildTopDrawerContentHTML() {
 
         <div class="cqst-row-wrap">
             <div class="cqst-tabs" id="cqst-top-tabs">
-                <button type="button" class="cqst-tab-btn active" data-cqst-tab="archive">📚 记忆档案库 (<span id="cqst-top-count-badge">0</span>)</button>
-                <button type="button" class="cqst-tab-btn" data-cqst-tab="branches">🌿 隔间与分支总管</button>
-                <button type="button" class="cqst-tab-btn" data-cqst-tab="settings">⚙️ 存储、模型与深度配置</button>
+                <button type="button" class="cqst-tab-btn active" data-cqst-tab="archive">📚 记忆档案 (<span id="cqst-top-count-badge">0</span>)</button>
+                <button type="button" class="cqst-tab-btn" data-cqst-tab="branches">🌿 隔间总管</button>
+                <button type="button" class="cqst-tab-btn" data-cqst-tab="settings">⚙️ 配置与深度</button>
             </div>
             <div style="font-size:11.5px;color:var(--cqst-text-faded);" id="cqst-top-chat-hint">聊天分支：未激活对话</div>
         </div>
@@ -2362,7 +2368,7 @@ function buildTopDrawerContentHTML() {
                         </label>
                         <div class="cqst-row-wrap" style="margin-top:2px;">
                             <button type="button" class="cqst-btn sm" id="cqst-top-btn-reset-default">↩️ 恢复默认分支名</button>
-                            <div style="display:flex;gap:6px;">
+                            <div style="display:flex;gap:6px;flex-wrap:wrap;">
                                 <button type="button" class="cqst-btn sm" id="cqst-top-btn-bind">🔗 仅切换绑定</button>
                                 <button type="button" class="cqst-btn sm primary" id="cqst-top-btn-rename">✏️ 重命名并迁移</button>
                             </div>
@@ -2587,7 +2593,11 @@ function buildTopDrawerContentHTML() {
                             <label class="cqst-form-label">当前隔间 [<span id="cqst-cfg-cur-branch-label">tavern_default</span>] 专属补充设定（总结与唤醒均附带）</label>
                             <textarea id="cqst-cfg-branch-persona" class="cqst-textarea" rows="2" placeholder="仅对当前隔间生效的角色关系/剧情补充设定（可留空）..."></textarea>
                         </div>
-                        <div class="cqst-row" style="justify-content:flex-end;margin-top:4px;">
+                        <div class="cqst-row-wrap" style="margin-top:4px;">
+                            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                                <span class="cqst-status-pill" id="cqst-cfg-version-badge">v${PLUGIN_VERSION}</span>
+                                <button type="button" class="cqst-btn sm" id="cqst-btn-update-plugin" title="检查并一键更新插件">🔄 检查更新</button>
+                            </div>
                             <button type="button" class="cqst-btn primary" id="cqst-btn-save-settings">💾 保存全部配置</button>
                         </div>
                     </div>
@@ -2639,13 +2649,17 @@ function mountSillyTavernHooks() {
                 <div class="cqst-st-settings-box">
                     <div class="cqst-row-wrap">
                         <span style="font-size:12px;">当前隔间：<strong id="cqst-ext-cur-compartment">tavern_default</strong></span>
-                        <span class="cqst-status-pill" id="cqst-ext-storage-pill">💾 本地模式</span>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <span class="cqst-status-pill" id="cqst-ext-version-pill">v${PLUGIN_VERSION}</span>
+                            <span class="cqst-status-pill" id="cqst-ext-storage-pill">💾 本地模式</span>
+                        </div>
                     </div>
                     <div class="cqst-row-wrap">
                         <button type="button" class="cqst-btn sm primary" id="cqst-ext-open-archive">🏛️ 打开全景档案页</button>
                         <button type="button" class="cqst-btn sm" id="cqst-ext-open-branches">🌿 隔间总管</button>
                         <button type="button" class="cqst-btn sm" id="cqst-ext-open-settings">⚙️ 配置</button>
                         <button type="button" class="cqst-btn sm" id="cqst-ext-open-mini">✉️ 速控球</button>
+                        <button type="button" class="cqst-btn sm" id="cqst-ext-update-btn" title="检查并更新扩展">🔄 检查更新</button>
                     </div>
                     <label style="font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
                         <input type="checkbox" class="cqst-checkbox" id="cqst-ext-show-pill">
@@ -2671,6 +2685,10 @@ function mountSillyTavernHooks() {
             state.config.showFloatingPill = e.target.checked;
             saveSettings();
             renderAllUI();
+        });
+        document.getElementById('cqst-ext-update-btn').addEventListener('click', () => {
+            if (state.updateInfo.hasUpdate) triggerPluginOneClickUpdate();
+            else checkPluginUpdate({ manual: true });
         });
     }
 
@@ -2817,17 +2835,22 @@ function updateMiniPanelPosition() {
     panel.style.bottom = 'auto';
 }
 
+function getEdgeDockGap() {
+    return window.innerWidth <= 680 ? 12 : 0;
+}
+
 function updatePillEdgeDock(pill = document.getElementById('cqst-floating-pill'), { snap = false } = {}) {
     if (!pill) return '';
     const vw = window.innerWidth;
     const w = pill.offsetWidth || 44;
     const left = pill.offsetLeft;
-    const dockThreshold = 24;
+    const edgeGap = getEdgeDockGap();
+    const dockThreshold = vw <= 680 ? 30 : 24;
 
     pill.classList.remove('cqst-dock-left', 'cqst-dock-right');
     if (left <= dockThreshold) {
         if (snap) {
-            pill.style.left = '0px';
+            pill.style.left = `${edgeGap}px`;
             pill.style.right = 'auto';
             pill.style.top = `${pill.offsetTop}px`;
             pill.style.bottom = 'auto';
@@ -2838,7 +2861,7 @@ function updatePillEdgeDock(pill = document.getElementById('cqst-floating-pill')
     if (vw - (left + w) <= dockThreshold) {
         if (snap) {
             pill.style.left = 'auto';
-            pill.style.right = '0px';
+            pill.style.right = `${edgeGap}px`;
             pill.style.top = `${pill.offsetTop}px`;
             pill.style.bottom = 'auto';
         }
@@ -2853,6 +2876,7 @@ function clampPillIntoViewport(pill = document.getElementById('cqst-floating-pil
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const margin = 6;
+    const edgeGap = getEdgeDockGap();
     const w = pill.offsetWidth || 44;
     const h = pill.offsetHeight || 44;
     const curLeft = pill.offsetLeft;
@@ -2864,7 +2888,7 @@ function clampPillIntoViewport(pill = document.getElementById('cqst-floating-pil
 
     if (wasDockedRight) {
         pill.style.left = 'auto';
-        pill.style.right = '0px';
+        pill.style.right = `${edgeGap}px`;
         pill.style.top = `${Math.round(clampedTop)}px`;
         pill.style.bottom = 'auto';
         updatePillEdgeDock(pill, { snap: true });
@@ -2872,7 +2896,7 @@ function clampPillIntoViewport(pill = document.getElementById('cqst-floating-pil
     }
 
     if (wasDockedLeft) {
-        pill.style.left = '0px';
+        pill.style.left = `${edgeGap}px`;
         pill.style.right = 'auto';
         pill.style.top = `${Math.round(clampedTop)}px`;
         pill.style.bottom = 'auto';
@@ -2880,9 +2904,10 @@ function clampPillIntoViewport(pill = document.getElementById('cqst-floating-pil
         return;
     }
 
-    const maxLeft = Math.max(0, vw - w);
-    if (curLeft < 0 || curLeft > maxLeft || curTop < margin || curTop > maxTop) {
-        const nextLeft = Math.max(0, Math.min(maxLeft, curLeft));
+    const minLeft = edgeGap;
+    const maxLeft = Math.max(edgeGap, vw - w - edgeGap);
+    if (curLeft < minLeft || curLeft > maxLeft || curTop < margin || curTop > maxTop) {
+        const nextLeft = Math.max(minLeft, Math.min(maxLeft, curLeft));
         pill.style.left = `${Math.round(nextLeft)}px`;
         pill.style.top = `${Math.round(clampedTop)}px`;
         pill.style.right = 'auto';
@@ -2902,10 +2927,11 @@ function restorePillPosition(pill) {
         const h = pill.offsetHeight || 44;
         const maxY = Math.max(6, window.innerHeight - h - 6);
         const safeTop = typeof pos.top === 'number' ? Math.max(6, Math.min(maxY, pos.top)) : null;
+        const edgeGap = getEdgeDockGap();
 
         if (pos.dock === 'right') {
             pill.style.left = 'auto';
-            pill.style.right = '0px';
+            pill.style.right = `${edgeGap}px`;
             if (safeTop !== null) {
                 pill.style.top = `${Math.round(safeTop)}px`;
                 pill.style.bottom = 'auto';
@@ -2914,7 +2940,7 @@ function restorePillPosition(pill) {
             return;
         }
         if (pos.dock === 'left') {
-            pill.style.left = '0px';
+            pill.style.left = `${edgeGap}px`;
             pill.style.right = 'auto';
             if (safeTop !== null) {
                 pill.style.top = `${Math.round(safeTop)}px`;
@@ -2925,8 +2951,8 @@ function restorePillPosition(pill) {
         }
         if (typeof pos.left === 'number' && safeTop !== null) {
             const w = pill.offsetWidth || 64;
-            const maxX = Math.max(0, window.innerWidth - w);
-            pill.style.left = `${Math.max(0, Math.min(maxX, pos.left))}px`;
+            const maxX = Math.max(edgeGap, window.innerWidth - w - edgeGap);
+            pill.style.left = `${Math.max(edgeGap, Math.min(maxX, pos.left))}px`;
             pill.style.top = `${Math.round(safeTop)}px`;
             pill.style.right = 'auto';
             pill.style.bottom = 'auto';
@@ -2941,7 +2967,7 @@ function resetPillPosition() {
     if (pill) {
         pill.style.left = '';
         pill.style.top = '';
-        pill.style.right = '0px';
+        pill.style.right = `${getEdgeDockGap()}px`;
         pill.style.bottom = '92px';
         updatePillEdgeDock(pill, { snap: false });
     }
@@ -2950,27 +2976,70 @@ function resetPillPosition() {
 
 function bindPillDragAndClick(pill) {
     let startX = 0, startY = 0, origLeft = 0, origTop = 0;
-    let dragging = false, moved = false;
+    let pointerActive = false, dragArmed = false, moved = false, isTouch = false;
+    let activePointerId = null;
+    let holdTimer = null;
+
+    const clearHoldTimer = () => {
+        if (holdTimer) {
+            clearTimeout(holdTimer);
+            holdTimer = null;
+        }
+    };
 
     pill.addEventListener('pointerdown', (e) => {
         if (e.button !== 0 && e.pointerType === 'mouse') return;
-        dragging = true;
+        clearHoldTimer();
+        pointerActive = true;
         moved = false;
+        isTouch = e.pointerType === 'touch';
+        dragArmed = !isTouch;
+        activePointerId = e.pointerId;
         startX = e.clientX;
         startY = e.clientY;
         origLeft = pill.offsetLeft;
         origTop = pill.offsetTop;
-        pill.classList.add('dragging');
-        pill.setPointerCapture?.(e.pointerId);
+
+        if (isTouch) {
+            // 手机触屏需长按 180ms 才激活拖拽，防止与边缘返回手势/滑动误触冲突
+            holdTimer = setTimeout(() => {
+                if (!pointerActive || moved) return;
+                dragArmed = true;
+                pill.classList.add('drag-armed');
+                try {
+                    if (activePointerId !== null) pill.setPointerCapture?.(activePointerId);
+                } catch (err) {}
+            }, 180);
+        } else {
+            pill.classList.add('dragging');
+            pill.setPointerCapture?.(e.pointerId);
+        }
     });
 
     pill.addEventListener('pointermove', (e) => {
-        if (!dragging) return;
+        if (!pointerActive) return;
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
-        if (!moved && Math.hypot(dx, dy) > 6) moved = true;
+        const dist = Math.hypot(dx, dy);
+
+        if (isTouch && !dragArmed) {
+            // 未长按激活前若发生较大幅度滑动，视为误触/系统返回手势，直接取消交互
+            if (dist > 8) {
+                clearHoldTimer();
+                pointerActive = false;
+                pill.classList.remove('dragging', 'drag-armed');
+            }
+            return;
+        }
+
+        if (!moved && dist > 6) {
+            moved = true;
+            pill.classList.add('dragging');
+        }
         if (!moved) return;
-        const nextLeft = Math.max(0, Math.min(window.innerWidth - pill.offsetWidth, origLeft + dx));
+
+        const edgeGap = getEdgeDockGap();
+        const nextLeft = Math.max(edgeGap, Math.min(window.innerWidth - pill.offsetWidth - edgeGap, origLeft + dx));
         const nextTop = Math.max(6, Math.min(window.innerHeight - pill.offsetHeight - 6, origTop + dy));
         pill.style.left = `${nextLeft}px`;
         pill.style.top = `${nextTop}px`;
@@ -2981,9 +3050,10 @@ function bindPillDragAndClick(pill) {
     });
 
     const endDrag = () => {
-        if (!dragging) return;
-        dragging = false;
-        pill.classList.remove('dragging');
+        clearHoldTimer();
+        if (!pointerActive) return;
+        pointerActive = false;
+        pill.classList.remove('dragging', 'drag-armed');
         if (moved) {
             const dock = updatePillEdgeDock(pill, { snap: true });
             try {
@@ -2996,7 +3066,11 @@ function bindPillDragAndClick(pill) {
     };
 
     pill.addEventListener('pointerup', endDrag);
-    pill.addEventListener('pointercancel', endDrag);
+    pill.addEventListener('pointercancel', () => {
+        clearHoldTimer();
+        pointerActive = false;
+        pill.classList.remove('dragging', 'drag-armed');
+    });
 }
 
 function togglePanel(forceOpen = null) {
@@ -3316,8 +3390,230 @@ function toggleThemeMode() {
     );
 }
 
+function compareSemver(a = '', b = '') {
+    const pa = String(a || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b || '').replace(/^v/i, '').split('.').map(n => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length, 3);
+    for (let i = 0; i < len; i++) {
+        const va = pa[i] || 0;
+        const vb = pb[i] || 0;
+        if (va > vb) return 1;
+        if (va < vb) return -1;
+    }
+    return 0;
+}
+
+function detectInstalledExtensionNames() {
+    const names = [];
+    const pushUnique = (n) => {
+        const clean = String(n || '').replace(/^\/+|\/+$/g, '').trim();
+        if (clean && !names.includes(clean)) names.push(clean);
+    };
+
+    try {
+        const nodes = document.querySelectorAll('script[src*="scripts/extensions/"], link[href*="scripts/extensions/"]');
+        nodes.forEach(el => {
+            const url = el.getAttribute('src') || el.getAttribute('href') || '';
+            const m = /scripts\/extensions\/((?:third-party\/)?[^/?#]+)\/(?:index\.js|style\.css)/i.exec(url);
+            if (m && m[1]) pushUnique(decodeURIComponent(m[1]));
+        });
+    } catch (e) {}
+
+    pushUnique('third-party/sillytavern-xinjian-memory');
+    pushUnique('sillytavern-xinjian-memory');
+    pushUnique('third-party/sillytavern-chuqing-memory');
+    return names;
+}
+
+function renderUpdateNoticeUI() {
+    const info = state.updateInfo || {};
+    const hasUpdate = Boolean(info.hasUpdate);
+    const verSuffix = info.remoteVersion ? ` v${info.remoteVersion}` : '';
+
+    const topBtn = document.getElementById('cqst-top-update-btn');
+    if (topBtn) {
+        topBtn.style.display = hasUpdate ? 'inline-flex' : 'none';
+        if (hasUpdate) {
+            topBtn.textContent = info.remoteVersion ? `🆕 更新 v${info.remoteVersion}` : '🆕 立即更新';
+            topBtn.title = `发现新版本${verSuffix}（当前 v${PLUGIN_VERSION}），点击立即更新`;
+        }
+    }
+
+    const cfgBadge = document.getElementById('cqst-cfg-version-badge');
+    if (cfgBadge) {
+        cfgBadge.textContent = hasUpdate ? `v${PLUGIN_VERSION} → v${info.remoteVersion || '新版'}` : `v${PLUGIN_VERSION}`;
+        cfgBadge.classList.toggle('custom', hasUpdate);
+    }
+
+    const extPill = document.getElementById('cqst-ext-version-pill');
+    if (extPill) {
+        extPill.textContent = hasUpdate ? `🆕 v${info.remoteVersion || '新版'}` : `v${PLUGIN_VERSION}`;
+        extPill.classList.toggle('custom', hasUpdate);
+    }
+
+    ['cqst-btn-update-plugin', 'cqst-ext-update-btn'].forEach(id => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.classList.toggle('update-ready', hasUpdate);
+        btn.textContent = hasUpdate
+            ? `🆕 立即更新${info.remoteVersion ? ` (${info.remoteVersion})` : ''}`
+            : '🔄 检查更新';
+        btn.title = hasUpdate
+            ? `当前 v${PLUGIN_VERSION}，点击一键拉取${verSuffix}并刷新`
+            : `当前 v${PLUGIN_VERSION}，点击检查 GitHub 是否有新版本`;
+    });
+}
+
+async function getSTRequestHeadersSafe() {
+    const ctx = getSTContext();
+    if (typeof ctx?.getRequestHeaders === 'function') {
+        try {
+            return ctx.getRequestHeaders();
+        } catch (e) {}
+    }
+    if (typeof globalThis.getRequestHeaders === 'function') {
+        try {
+            return globalThis.getRequestHeaders();
+        } catch (e) {}
+    }
+    const headers = { 'Content-Type': 'application/json' };
+    try {
+        const tokenRes = await fetch('/csrf-token');
+        if (tokenRes.ok) {
+            const data = await tokenRes.json();
+            if (data?.token) headers['X-CSRF-Token'] = data.token;
+        }
+    } catch (e) {}
+    return headers;
+}
+
+async function checkPluginUpdate({ manual = false } = {}) {
+    if (manual) {
+        showToast('正在检查更新...', `当前版本 v${PLUGIN_VERSION}`, 'info', 2000);
+    }
+
+    let remoteVersion = '';
+    let hasUpdate = false;
+    let errMsg = '';
+
+    try {
+        const res = await fetch(`${PLUGIN_REMOTE_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const remote = await res.json();
+        if (remote?.version) {
+            remoteVersion = String(remote.version).trim();
+            if (compareSemver(remoteVersion, PLUGIN_VERSION) > 0) {
+                hasUpdate = true;
+            }
+        }
+    } catch (e) {
+        errMsg = e?.message || String(e);
+    }
+
+    // 同步尝试用酒馆自带版本接口核对 Git 提交是否落后
+    if (!hasUpdate) {
+        try {
+            const headers = await getSTRequestHeadersSafe();
+            for (const extensionName of detectInstalledExtensionNames()) {
+                const vRes = await fetch('/api/extensions/version', {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ extensionName })
+                });
+                if (vRes.ok) {
+                    const vData = await vRes.json();
+                    if (vData && vData.isUpToDate === false) {
+                        hasUpdate = true;
+                    }
+                    break;
+                }
+            }
+        } catch (e) {}
+    }
+
+    state.updateInfo = {
+        checked: true,
+        hasUpdate,
+        remoteVersion: remoteVersion || (hasUpdate ? '新版' : PLUGIN_VERSION),
+        error: errMsg
+    };
+    renderUpdateNoticeUI();
+
+    if (hasUpdate) {
+        const label = remoteVersion ? `v${remoteVersion}` : '新提交';
+        showToast(
+            `✨ 发现插件新版本 (${label})`,
+            `当前 v${PLUGIN_VERSION}，点击顶栏「🆕 更新」或设置里的按钮即可升级`,
+            'info',
+            5200
+        );
+    } else if (manual) {
+        if (errMsg && !remoteVersion) {
+            showToast('检查更新失败', `无法连接 GitHub：${errMsg}`, 'warn');
+        } else {
+            showToast(`已是最新版 (v${PLUGIN_VERSION})`, `已与 ${PLUGIN_REPO} 对齐`, 'ok');
+        }
+    }
+    return state.updateInfo;
+}
+
+async function triggerPluginOneClickUpdate() {
+    const btns = ['cqst-top-update-btn', 'cqst-btn-update-plugin', 'cqst-ext-update-btn']
+        .map(id => document.getElementById(id))
+        .filter(Boolean);
+    btns.forEach(b => { b.disabled = true; });
+    showLoading('UPDATING', '正在拉取最新扩展代码...');
+
+    try {
+        const headers = await getSTRequestHeadersSafe();
+        const candidates = detectInstalledExtensionNames();
+        let updated = false;
+        let lastErr = '';
+
+        for (const extensionName of candidates) {
+            for (const payload of [{ extensionName, global: true }, { extensionName }]) {
+                try {
+                    const res = await fetch('/api/extensions/update', {
+                        method: 'POST',
+                        headers,
+                        body: JSON.stringify(payload)
+                    });
+                    if (res.ok) {
+                        updated = true;
+                        break;
+                    }
+                    lastErr = `HTTP ${res.status}`;
+                } catch (err) {
+                    lastErr = err?.message || String(err);
+                }
+            }
+            if (updated) break;
+        }
+
+        if (updated) {
+            state.updateInfo.hasUpdate = false;
+            renderUpdateNoticeUI();
+            showToast('🎉 插件已更新！', '请刷新页面加载最新代码', 'ok', 4500);
+            if (confirm('🎉 信笺记忆库已更新到最新版本！\n是否立即刷新酒馆页面以生效？')) {
+                location.reload();
+            }
+        } else {
+            showToast(
+                '无法直接热更新',
+                `请打开酒馆「扩展 → 管理扩展」点更新，或访问 github.com/${PLUGIN_REPO}（${lastErr || '非 Git 安装'}）`,
+                'warn',
+                5600
+            );
+        }
+    } finally {
+        hideLoading();
+        btns.forEach(b => { b.disabled = false; });
+    }
+}
+
 function renderAllUI() {
     applyThemeMode(state.config.themeMode);
+    renderUpdateNoticeUI();
     const slices = getCachedSlices(state.currentCompartment);
     const count = slices.length;
     const isGh = isGithubModeActive();
@@ -4016,6 +4312,14 @@ function bindBaseUIEvents() {
 
     // 随行速控小面板事件
     document.getElementById('cqst-btn-close-panel').addEventListener('click', () => togglePanel(false));
+    document.getElementById('cqst-mini-hide-pill-btn').addEventListener('click', () => {
+        state.config.showFloatingPill = false;
+        togglePanel(false);
+        saveSettings();
+        populateSettingsUI();
+        renderAllUI();
+        showToast('已隐藏悬浮球', '可点顶栏 ✉️ 打开全景页 → ⚙️ 配置与深度 中重新显示', 'info');
+    });
     document.getElementById('cqst-mini-theme-btn').addEventListener('click', toggleThemeMode);
     document.getElementById('cqst-mini-open-panorama').addEventListener('click', () => openPanoramaAt('archive'));
     document.getElementById('cqst-mini-sync-btn').addEventListener('click', handleSyncCurrentAction);
@@ -4190,6 +4494,7 @@ function bindTopDrawerEvents() {
         btn.addEventListener('click', () => switchPanoramaTab(btn.getAttribute('data-cqst-tab')));
     });
 
+    document.getElementById('cqst-top-update-btn').addEventListener('click', triggerPluginOneClickUpdate);
     document.getElementById('cqst-top-theme-btn').addEventListener('click', toggleThemeMode);
     document.getElementById('cqst-top-sync-btn').addEventListener('click', handleSyncCurrentAction);
 
@@ -4735,6 +5040,11 @@ function bindTopDrawerEvents() {
         showToast('已恢复默认提示词', '后续 AI 总结归档将使用默认切片规则', 'info');
     });
 
+    document.getElementById('cqst-btn-update-plugin').addEventListener('click', () => {
+        if (state.updateInfo.hasUpdate) triggerPluginOneClickUpdate();
+        else checkPluginUpdate({ manual: true });
+    });
+
     document.getElementById('cqst-btn-save-settings').addEventListener('click', async () => {
         const prevRepo = (state.config.githubRepo || '').trim();
         const prevDirMode = state.config.githubDirMode || 'isolated';
@@ -4938,6 +5248,10 @@ function initExtensionCore() {
             if (!document.getElementById('cqst-floating-pill')) mountBaseContainers();
             mountSillyTavernHooks();
         }, 3000);
+
+        setTimeout(() => {
+            checkPluginUpdate({ manual: false }).catch(() => {});
+        }, 2500);
     })();
     return initPromise;
 }
