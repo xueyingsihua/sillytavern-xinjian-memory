@@ -1322,11 +1322,37 @@ input[type="checkbox"].cqst-checkbox:checked::after {
         overflow: visible;
     }
 
-    #cqst-floating-pill.cqst-dock-left:not(:hover):not(.dragging):not(.cqst-pill-awake):not(.drag-armed),
+    #cqst-floating-pill.cqst-dock-left:not(:hover):not(.dragging):not(.cqst-pill-awake):not(.drag-armed) {
+        border-radius: 50%;
+        opacity: 0.46;
+        transform: translateX(-40%);
+    }
+
     #cqst-floating-pill.cqst-dock-right:not(:hover):not(.dragging):not(.cqst-pill-awake):not(.drag-armed) {
         border-radius: 50%;
-        opacity: 0.42;
-        transform: translateX(0);
+        opacity: 0.46;
+        transform: translateX(40%);
+    }
+
+    #cqst-floating-pill.cqst-dock-right:not(:hover):not(.dragging):not(.cqst-pill-awake):not(.drag-armed) .cqst-pill-count {
+        right: auto;
+        left: -5px;
+    }
+
+    #cqst-floating-pill.cqst-dock-left.cqst-pill-awake:not(.dragging) {
+        transform: translateX(14px);
+    }
+
+    #cqst-floating-pill.cqst-dock-right.cqst-pill-awake:not(.dragging) {
+        transform: translateX(-14px);
+    }
+
+    #cqst-floating-pill.cqst-dock-left.drag-armed:not(.dragging) {
+        transform: translateX(18px) scale(1.08);
+    }
+
+    #cqst-floating-pill.cqst-dock-right.drag-armed:not(.dragging) {
+        transform: translateX(-18px) scale(1.08);
     }
 
     #cqst-floating-pill .cqst-pill-label,

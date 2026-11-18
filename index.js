@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.1';
+const PLUGIN_VERSION = '1.0.2';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -2067,6 +2067,7 @@ function mountBaseContainers() {
             </div>
             <div class="cqst-recall-preview" id="cqst-mini-recall-preview"></div>
         </div>
+        <div class="cqst-form-hint" style="text-align:center;">💡 轻点悬浮球可直接打开；想挪动位置时，先点开小窗或长按球体待其弹出后再拖动，可避开手机边缘返回手势。</div>
     `;
     document.body.appendChild(panel);
 
@@ -2836,7 +2837,7 @@ function updateMiniPanelPosition() {
 }
 
 function getEdgeDockGap() {
-    return window.innerWidth <= 680 ? 12 : 0;
+    return 0;
 }
 
 function updatePillEdgeDock(pill = document.getElementById('cqst-floating-pill'), { snap = false } = {}) {
@@ -2845,7 +2846,7 @@ function updatePillEdgeDock(pill = document.getElementById('cqst-floating-pill')
     const w = pill.offsetWidth || 44;
     const left = pill.offsetLeft;
     const edgeGap = getEdgeDockGap();
-    const dockThreshold = vw <= 680 ? 30 : 24;
+    const dockThreshold = vw <= 680 ? 14 : 24;
 
     pill.classList.remove('cqst-dock-left', 'cqst-dock-right');
     if (left <= dockThreshold) {
