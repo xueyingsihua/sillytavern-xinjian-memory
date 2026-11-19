@@ -1152,6 +1152,43 @@ input[type="checkbox"].cqst-checkbox:checked::after {
     flex: 1 1 110px;
 }
 
+.cqst-char-counter {
+    font-family: var(--cqst-font-mono);
+    font-size: 11px;
+    color: var(--cqst-text-faded);
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.cqst-char-counter.warn {
+    color: var(--cqst-red);
+    font-weight: 700;
+}
+
+.cqst-batch-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    background: var(--cqst-danger-hover-bg);
+    border: 1px dashed var(--cqst-red);
+    border-radius: 7px;
+}
+
+.cqst-batch-info {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--cqst-red);
+}
+
+#cqst-btn-toggle-batch-delete.active {
+    border-color: var(--cqst-red);
+    color: var(--cqst-red);
+    font-weight: 700;
+}
+
 .cqst-slice-card {
     background: var(--cqst-bg-light);
     border-radius: 6px;
@@ -1162,6 +1199,23 @@ input[type="checkbox"].cqst-checkbox:checked::after {
     flex-direction: column;
     gap: 6px;
     flex-shrink: 0;
+}
+
+.cqst-slice-card.batch-mode .cqst-slice-text {
+    cursor: pointer;
+}
+
+.cqst-slice-card.selected {
+    border-left-color: var(--cqst-red);
+    background: var(--cqst-bg-input);
+    box-shadow: 0 0 0 1.5px var(--cqst-red);
+}
+
+.cqst-slice-top-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
 }
 
 .cqst-slice-card.collapsed {

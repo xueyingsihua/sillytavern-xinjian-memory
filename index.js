@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.5';
+const PLUGIN_VERSION = '1.0.6';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -100,7 +100,7 @@ const DEFAULT_CONFIG = {
     injectRole: 0, // 0: SYSTEM, 1: USER, 2: ASSISTANT
     showRecallToast: true,
     autoArchiveEnabled: false,
-    autoTurns: 10,
+    autoTurns: 5,
     showFloatingPill: true,
     themeMode: 'day', // 'day' (信笺·初晴) | 'night' (信笺·星夜)
     summaryPrompt: DEFAULT_SUMMARY_PROMPT,
@@ -133,6 +133,8 @@ const state = {
     slicePage: 1,
     slicesCollapsed: false,
     toggledSliceIds: new Set(),
+    batchDeleteMode: false,
+    selectedSliceIds: new Set(),
     updateInfo: { checked: false, hasUpdate: false, remoteVersion: '', error: '' },
     lastRecalledSlices: [],
     stagedManualRecall: null, // { query, compartment, recalled, formattedBlock, chatLen }
@@ -650,11 +652,8 @@ function loadSettings() {
             state.config.injectPosition = parseIntInRange(state.config.injectPosition, 0, 2, 1);
             state.config.injectRole = parseIntInRange(state.config.injectRole, 0, 2, 0);
             state.config.recallScanFloors = parseIntInRange(state.config.recallScanFloors, 1, 12, 4);
-            state.config.autoTurns = parseIntInRange(state.config.autoTurns, 1, 50, 10);
+            state.config.autoTurns = parseIntInRange(state.config.autoTurns, 1, 50, 5);
             state.config.themeMode = state.config.themeMode === 'night' ? 'night' : 'day';
-            if (!saved.config.autoArchiveEnabled && saved.config.autoTurns === 5) {
-                state.config.autoTurns = 10;
-            }
             if (!state.config.summaryPrompt || !String(state.config.summaryPrompt).trim()
                 || (state.config.summaryPrompt.includes('切片数量自适应') && !state.config.summaryPrompt.includes('客观忠实不回避'))) {
                 state.config.summaryPrompt = DEFAULT_SUMMARY_PROMPT;
@@ -1257,6 +1256,8 @@ async function switchChatToCompartment(targetName, { bindCurrentChat = true, for
     }
 
     state.currentCompartment = cleanTarget;
+    state.batchDeleteMode = false;
+    state.selectedSliceIds.clear();
     ensureCompartmentRegistered(cleanTarget);
     saveSettings();
     await loadCompartment(cleanTarget, { forceRemote });
@@ -2517,6 +2518,7 @@ async function commitPendingDraftsFlow() {
         const miniBox = document.getElementById('cqst-mini-archive-text');
         if (topBox) topBox.value = '';
         if (miniBox) miniBox.value = '';
+        updateArchiveCharCounters();
         renderPendingDraftsUI();
 
         const modeText = isGithubModeActive() ? '本地 + GitHub 私有库' : '本地 IndexedDB';
@@ -2535,6 +2537,39 @@ async function commitPendingDraftsFlow() {
     } finally {
         hideLoading();
     }
+}
+
+function updateArchiveCharCounters() {
+    const pairs = [
+        { inputId: 'cqst-top-archive-preview', counterId: 'cqst-top-archive-charcount', compact: false },
+        { inputId: 'cqst-mini-archive-text', counterId: 'cqst-mini-archive-charcount', compact: true }
+    ];
+    pairs.forEach(({ inputId, counterId, compact }) => {
+        const input = document.getElementById(inputId);
+        const counter = document.getElementById(counterId);
+        if (!input || !counter) return;
+
+        const text = (input.value || '').trim();
+        const len = text.length;
+        counter.classList.remove('warn');
+
+        if (len === 0) {
+            counter.textContent = compact
+                ? '建议单次 3~5 轮（约 2000~6000 字），总结更快更精准'
+                : '建议单次抓取 3~5 轮（约 2000~6000 字），速度更快、细节更不易漏';
+            return;
+        }
+
+        const chunks = splitSummaryChunks(text, 7500).length;
+        if (len > 8500 || chunks > 1) {
+            counter.classList.add('warn');
+            counter.textContent = `当前 ${len.toLocaleString()} 字 · 将拆成 ${chunks} 段串联总结（耗时较长，建议缩短到 3~5 轮）`;
+        } else if (len > 6000) {
+            counter.textContent = `当前 ${len.toLocaleString()} 字 · 约 1 段总结（偏长，耗时可能稍久）`;
+        } else {
+            counter.textContent = `当前 ${len.toLocaleString()} 字 · 约 1 段总结（长度适中）`;
+        }
+    });
 }
 
 /* ============================================================================
@@ -2617,6 +2652,7 @@ function mountBaseContainers() {
                 <div style="display:flex;align-items:center;gap:4px;">
                     <select id="cqst-mini-scrape-turns" class="cqst-select compact-h" style="width:auto;">
                         <option value="unarchived">✨ 未归档新楼层</option>
+                        <option value="3">最近 3 轮（推荐）</option>
                         <option value="5">最近 5 轮</option>
                         <option value="10">最近 10 轮</option>
                     </select>
@@ -2625,6 +2661,7 @@ function mountBaseContainers() {
             </div>
             <select id="cqst-mini-scrape-preset" class="cqst-select compact-h" title="切换正文抓取与清洗规则预设"></select>
             <textarea id="cqst-mini-archive-text" class="cqst-textarea" rows="2" placeholder="点击「🔍 抓取」或粘贴内容（可手动微调）..."></textarea>
+            <div class="cqst-char-counter" id="cqst-mini-archive-charcount">建议单次 3~5 轮（约 2000~6000 字），总结更快更精准</div>
             <div class="cqst-tag-list" id="cqst-mini-tag-list"></div>
             <div class="cqst-row-wrap">
                 <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
@@ -2834,6 +2871,7 @@ function buildTopDrawerContentHTML() {
                             <div style="display:flex;align-items:center;gap:5px;">
                                 <select id="cqst-top-scrape-mode" class="cqst-select compact-h" style="width:auto;">
                                     <option value="unarchived">✨ 未归档新楼层</option>
+                                    <option value="recent3">最近 3 轮 (6层 · 推荐)</option>
                                     <option value="recent5">最近 5 轮 (10层)</option>
                                     <option value="recent10">最近 10 轮 (20层)</option>
                                     <option value="range">指定楼层范围</option>
@@ -2882,6 +2920,7 @@ function buildTopDrawerContentHTML() {
                             <input type="number" id="cqst-top-floor-end" class="cqst-input compact-h" min="0" value="20" placeholder="结束楼层">
                         </div>
                         <textarea id="cqst-top-archive-preview" class="cqst-textarea" rows="4" placeholder="点击「🔍 抓取」读取酒馆对话，或粘贴文本（可编辑后再归档）..."></textarea>
+                        <div class="cqst-char-counter" id="cqst-top-archive-charcount">建议单次抓取 3~5 轮（约 2000~6000 字），速度更快、细节更不易漏</div>
                         <div class="cqst-row-wrap">
                             <span style="font-size:11.5px;color:var(--cqst-text-light);font-weight:700;">点选 #标签（盖印 𝔖）：</span>
                             <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
@@ -2898,7 +2937,7 @@ function buildTopDrawerContentHTML() {
                             </label>
                             <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;" title="勾选后才会每满 N 轮自动归档；不勾选则只手动归档、绝不自动存">
                                 <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-autoarchive">
-                                <span>开启自动存（每 <strong id="cqst-top-lbl-autoturns">10</strong> 轮）</span>
+                                <span>开启自动存（每 <strong id="cqst-top-lbl-autoturns">5</strong> 轮）</span>
                             </label>
                             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                                 <button type="button" class="cqst-btn bot" id="cqst-top-btn-summarize" title="仅执行第 1 步 AI 总结，生成可编辑草稿后再手动点「确认存入」">📝 先总结预览</button>
@@ -2941,6 +2980,7 @@ function buildTopDrawerContentHTML() {
                         <span style="font-size:12.5px;font-weight:700;">🗂️ 当前隔间档案 [<span id="cqst-top-archive-branch-name">tavern_default</span>]</span>
                         <div style="display:flex;gap:5px;flex-wrap:wrap;">
                             <button type="button" class="cqst-btn sm" id="cqst-btn-toggle-collapse-slices" title="一键折叠或展开当前列表中的记忆切片">🗂️ 折叠卡片</button>
+                            <button type="button" class="cqst-btn sm" id="cqst-btn-toggle-batch-delete" title="进入或退出批量勾选删除模式">☑️ 批量删除</button>
                             <button type="button" class="cqst-btn sm" id="cqst-btn-add-manual-slice">➕ 新增</button>
                             <button type="button" class="cqst-btn sm" id="cqst-btn-reembed" title="使用当前向量模型重算本隔间全部向量">🔄 重算向量</button>
                             <button type="button" class="cqst-btn sm" id="cqst-btn-import-json">📥 导入</button>
@@ -2950,6 +2990,15 @@ function buildTopDrawerContentHTML() {
                     </div>
                     <input type="text" id="cqst-drawer-search" class="cqst-input" placeholder="🔍 搜索记忆内容、日期或事件...">
                     <div class="cqst-tag-list" id="cqst-drawer-tag-bar"></div>
+                    <div class="cqst-batch-bar" id="cqst-batch-bar" style="display:none;">
+                        <span class="cqst-batch-info" id="cqst-batch-info">已选 0 条</span>
+                        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
+                            <button type="button" class="cqst-btn sm" id="cqst-btn-batch-select-page" title="全选或取消全选当前页卡片">本页全选</button>
+                            <button type="button" class="cqst-btn sm" id="cqst-btn-batch-select-all" title="勾选当前搜索/标签筛选下的全部卡片">全选筛选结果</button>
+                            <button type="button" class="cqst-btn sm" id="cqst-btn-batch-clear">清空</button>
+                            <button type="button" class="cqst-btn sm danger" id="cqst-btn-batch-confirm-delete" disabled>🗑️ 删除所选 (0)</button>
+                        </div>
+                    </div>
                     <div class="cqst-archive-scroll" id="cqst-drawer-list"></div>
                     <div class="cqst-pagination" id="cqst-drawer-pagination"></div>
                 </div>
@@ -3168,7 +3217,7 @@ function buildTopDrawerContentHTML() {
                                 <label class="cqst-form-label">唤醒扫几楼 / 自动存轮数 (<span id="cqst-cfg-auto-status">未开启</span>)</label>
                                 <div style="display:flex;gap:6px;align-items:center;">
                                     <input type="number" id="cqst-cfg-scan-floors" class="cqst-input" min="1" max="12" value="4" title="自动唤醒 / 留空挂载时扫描最近几楼正文（默认 4 楼）">
-                                    <input type="number" id="cqst-cfg-autoturns" class="cqst-input" min="1" max="50" value="10" title="仅设定触发间隔轮数；未在「记忆档案库」勾选「开启自动存」时不会自动保存">
+                                    <input type="number" id="cqst-cfg-autoturns" class="cqst-input" min="1" max="50" value="5" title="仅设定触发间隔轮数（推荐 3~5 轮，避免长对话单次文本过大）；未在「记忆档案库」勾选「开启自动存」时不会自动保存">
                                 </div>
                             </div>
                         </div>
@@ -3887,6 +3936,96 @@ function renderSlicePagination(total, totalPages) {
     });
 }
 
+function getFilteredDrawerSlices() {
+    const searchVal = (document.getElementById('cqst-drawer-search')?.value || '').trim().toLowerCase();
+    const slices = [...getCachedSlices(state.currentCompartment)].reverse();
+    return slices.filter(s => {
+        if (state.drawerFilterTag && !(s.tags || []).includes(state.drawerFilterTag)) return false;
+        if (searchVal) {
+            const hay = `${s.text || ''} ${(s.tags || []).join(' ')} ${s.event || ''} ${s.date || ''}`.toLowerCase();
+            if (!hay.includes(searchVal)) return false;
+        }
+        return true;
+    });
+}
+
+function pruneSelectedSliceIds() {
+    if (!state.selectedSliceIds.size) return;
+    const validIds = new Set(getCachedSlices(state.currentCompartment).map(s => s.id));
+    for (const id of Array.from(state.selectedSliceIds)) {
+        if (!validIds.has(id)) state.selectedSliceIds.delete(id);
+    }
+}
+
+function updateBatchDeleteToolbarUI(pageItems = [], filteredItems = []) {
+    pruneSelectedSliceIds();
+
+    const toggleBtn = document.getElementById('cqst-btn-toggle-batch-delete');
+    if (toggleBtn) {
+        toggleBtn.textContent = state.batchDeleteMode ? '✕ 退出批量' : '☑️ 批量删除';
+        toggleBtn.classList.toggle('active', state.batchDeleteMode);
+    }
+
+    const bar = document.getElementById('cqst-batch-bar');
+    if (bar) bar.style.display = state.batchDeleteMode ? 'flex' : 'none';
+    if (!state.batchDeleteMode) return;
+
+    const selectedCount = state.selectedSliceIds.size;
+    const infoEl = document.getElementById('cqst-batch-info');
+    if (infoEl) infoEl.textContent = `已选 ${selectedCount} 条（当前筛选共 ${filteredItems.length} 条）`;
+
+    const allPageSelected = pageItems.length > 0 && pageItems.every(s => state.selectedSliceIds.has(s.id));
+    const selPageBtn = document.getElementById('cqst-btn-batch-select-page');
+    if (selPageBtn) {
+        selPageBtn.textContent = allPageSelected ? '取消本页' : '本页全选';
+        selPageBtn.disabled = pageItems.length === 0;
+    }
+
+    const selAllBtn = document.getElementById('cqst-btn-batch-select-all');
+    if (selAllBtn) selAllBtn.disabled = filteredItems.length === 0;
+
+    const clearBtn = document.getElementById('cqst-btn-batch-clear');
+    if (clearBtn) clearBtn.disabled = selectedCount === 0;
+
+    const confirmBtn = document.getElementById('cqst-btn-batch-confirm-delete');
+    if (confirmBtn) {
+        confirmBtn.disabled = selectedCount === 0;
+        confirmBtn.textContent = `🗑️ 删除所选 (${selectedCount})`;
+    }
+}
+
+async function handleBatchDeleteSelectedSlices() {
+    pruneSelectedSliceIds();
+    const idsToDelete = new Set(state.selectedSliceIds);
+    if (idsToDelete.size === 0) {
+        showToast('请先勾选卡片', '请在列表中勾选需要删除的记忆切片', 'warn');
+        return;
+    }
+    if (!confirm(`确定批量删除选中的 ${idsToDelete.size} 条记忆切片吗？（此操作不可撤销）`)) return;
+
+    const abortController = new AbortController();
+    showLoading('DELETING', `正在批量删除 ${idsToDelete.size} 条记忆切片...`, { abortController });
+    try {
+        const next = getCachedSlices(state.currentCompartment).filter(item => !idsToDelete.has(item.id));
+        await saveCompartment(
+            state.currentCompartment,
+            next,
+            `Batch delete ${idsToDelete.size} memory slice(s)`,
+            { signal: abortController.signal, onStage: (scene, msg) => updateLoading(scene, msg) }
+        );
+        state.selectedSliceIds.clear();
+        state.batchDeleteMode = false;
+        renderAllUI();
+        showToast(`已批量删除 ${idsToDelete.size} 条记忆`, `隔间 [${state.currentCompartment}] 剩余 ${next.length} 条`, 'info');
+    } catch (err) {
+        if (!isAbortError(err)) {
+            showToast('批量删除失败', err.message || String(err), 'err');
+        }
+    } finally {
+        hideLoading();
+    }
+}
+
 function renderDrawerSlices() {
     const listEl = document.getElementById('cqst-drawer-list');
     if (!listEl) return;
@@ -3896,42 +4035,37 @@ function renderDrawerSlices() {
         collapseBtn.textContent = state.slicesCollapsed ? '📂 展开全部' : '🗂️ 折叠卡片';
     }
 
-    const searchVal = (document.getElementById('cqst-drawer-search')?.value || '').trim().toLowerCase();
-    const slices = [...getCachedSlices(state.currentCompartment)].reverse();
-
-    const filtered = slices.filter(s => {
-        if (state.drawerFilterTag && !(s.tags || []).includes(state.drawerFilterTag)) return false;
-        if (searchVal) {
-            const hay = `${s.text || ''} ${(s.tags || []).join(' ')} ${s.event || ''} ${s.date || ''}`.toLowerCase();
-            if (!hay.includes(searchVal)) return false;
-        }
-        return true;
-    });
-
+    const filtered = getFilteredDrawerSlices();
     const total = filtered.length;
     const totalPages = Math.max(1, Math.ceil(total / SLICE_PAGE_SIZE));
     state.slicePage = Math.max(1, Math.min(totalPages, state.slicePage || 1));
 
     if (total === 0) {
         listEl.innerHTML = `<div style="text-align:center;padding:34px 12px;color:var(--cqst-text-faded);font-size:13px;">当前隔间筛选下暂无记忆切片 ✉️</div>`;
+        updateBatchDeleteToolbarUI([], []);
         renderSlicePagination(0, 1);
         return;
     }
 
     const startIdx = (state.slicePage - 1) * SLICE_PAGE_SIZE;
     const pageItems = filtered.slice(startIdx, startIdx + SLICE_PAGE_SIZE);
+    updateBatchDeleteToolbarUI(pageItems, filtered);
 
     listEl.innerHTML = '';
     pageItems.forEach(s => {
         const isCollapsed = state.slicesCollapsed
             ? !state.toggledSliceIds.has(s.id)
             : state.toggledSliceIds.has(s.id);
+        const isSelected = state.batchDeleteMode && state.selectedSliceIds.has(s.id);
         const card = document.createElement('div');
-        card.className = `cqst-slice-card${isCollapsed ? ' collapsed' : ''}`;
+        card.className = `cqst-slice-card${isCollapsed ? ' collapsed' : ''}${state.batchDeleteMode ? ' batch-mode' : ''}${isSelected ? ' selected' : ''}`;
         const vecDim = Array.isArray(s.vector) ? s.vector.length : 0;
         card.innerHTML = `
-            <div class="cqst-slice-top" title="点击${isCollapsed ? '展开' : '折叠'}此条记忆切片">
-                <span>${isCollapsed ? '▸' : '▾'} 📅 ${escapeHtml(s.date || '未知日期')} · ${escapeHtml(s.event || '记忆')}</span>
+            <div class="cqst-slice-top" title="${state.batchDeleteMode ? '点击勾选 / 取消勾选此卡片' : `点击${isCollapsed ? '展开' : '折叠'}此条记忆切片`}">
+                <span class="cqst-slice-top-left">
+                    ${state.batchDeleteMode ? `<input type="checkbox" class="cqst-checkbox cqst-slice-select-chk" ${isSelected ? 'checked' : ''} aria-label="选中此记忆切片">` : ''}
+                    <span>${isCollapsed ? '▸' : '▾'} 📅 ${escapeHtml(s.date || '未知日期')} · ${escapeHtml(s.event || '记忆')}</span>
+                </span>
                 <span title="向量维度">◈ VEC-${vecDim}D</span>
             </div>
             <div class="cqst-slice-text">${escapeHtml(s.text)}</div>
@@ -3947,19 +4081,49 @@ function renderDrawerSlices() {
             </div>
         `;
 
+        const chk = card.querySelector('.cqst-slice-select-chk');
+        const applySelection = (nextChecked) => {
+            if (nextChecked) state.selectedSliceIds.add(s.id);
+            else state.selectedSliceIds.delete(s.id);
+            card.classList.toggle('selected', nextChecked);
+            if (chk) chk.checked = nextChecked;
+            updateBatchDeleteToolbarUI(pageItems, filtered);
+        };
+
+        if (chk) {
+            chk.addEventListener('click', (e) => {
+                e.stopPropagation();
+                applySelection(Boolean(chk.checked));
+            });
+        }
+
         card.querySelector('.cqst-slice-top').addEventListener('click', () => {
+            if (state.batchDeleteMode) {
+                applySelection(!state.selectedSliceIds.has(s.id));
+                return;
+            }
             if (state.toggledSliceIds.has(s.id)) state.toggledSliceIds.delete(s.id);
             else state.toggledSliceIds.add(s.id);
             renderDrawerSlices();
         });
 
-        card.querySelector('.btn-copy-slice').addEventListener('click', () => {
+        card.querySelector('.cqst-slice-text').addEventListener('click', () => {
+            if (state.batchDeleteMode) applySelection(!state.selectedSliceIds.has(s.id));
+        });
+
+        card.querySelector('.btn-copy-slice').addEventListener('click', (e) => {
+            e.stopPropagation();
             navigator.clipboard.writeText(`【记忆 | ${s.date} | #${(s.tags || []).join(' #')}】\n${s.text}`);
             showToast('已复制切片', '内容已复制到剪贴板', 'info');
         });
-        card.querySelector('.btn-edit-slice').addEventListener('click', () => openSliceModal(s));
-        card.querySelector('.btn-del-slice').addEventListener('click', async () => {
+        card.querySelector('.btn-edit-slice').addEventListener('click', (e) => {
+            e.stopPropagation();
+            openSliceModal(s);
+        });
+        card.querySelector('.btn-del-slice').addEventListener('click', async (e) => {
+            e.stopPropagation();
             if (!confirm(`确定删除这条记忆切片吗？\n「${(s.text || '').slice(0, 45)}...」`)) return;
+            state.selectedSliceIds.delete(s.id);
             const next = getCachedSlices(state.currentCompartment).filter(item => item.id !== s.id);
             await saveCompartment(state.currentCompartment, next, 'Delete memory slice');
             renderAllUI();
@@ -4298,7 +4462,7 @@ function renderAllUI() {
     const topAutoArc = document.getElementById('cqst-top-chk-autoarchive');
     if (topAutoArc) topAutoArc.checked = Boolean(state.config.autoArchiveEnabled);
     const topAutoTurns = document.getElementById('cqst-top-lbl-autoturns');
-    if (topAutoTurns) topAutoTurns.textContent = String(state.config.autoTurns || 10);
+    if (topAutoTurns) topAutoTurns.textContent = String(state.config.autoTurns || 5);
     const cfgAutoStatus = document.getElementById('cqst-cfg-auto-status');
     if (cfgAutoStatus) {
         cfgAutoStatus.textContent = state.config.autoArchiveEnabled ? '已开启' : '未开启·不自动存';
@@ -4642,7 +4806,7 @@ function populateSettingsUI() {
     document.getElementById('cqst-cfg-topk').value = String(state.config.topK ?? 5);
     document.getElementById('cqst-cfg-minscore').value = String(state.config.minScore ?? 0.38);
     document.getElementById('cqst-cfg-scan-floors').value = String(parseIntInRange(state.config.recallScanFloors, 1, 12, 4));
-    document.getElementById('cqst-cfg-autoturns').value = String(state.config.autoTurns ?? 10);
+    document.getElementById('cqst-cfg-autoturns').value = String(state.config.autoTurns ?? 5);
     document.getElementById('cqst-cfg-recall-toast').checked = Boolean(state.config.showRecallToast);
     document.getElementById('cqst-cfg-show-pill').checked = Boolean(state.config.showFloatingPill);
     document.getElementById('cqst-cfg-summary-prompt').value = state.config.summaryPrompt || DEFAULT_SUMMARY_PROMPT;
@@ -4959,16 +5123,20 @@ function bindBaseUIEvents() {
             return;
         }
         document.getElementById('cqst-mini-archive-text').value = scraped;
+        updateArchiveCharCounters();
         const r = state.lastScrapedRange;
         const rangeInfo = r ? `第 ${r.startFloor}~${r.endFloor} 层 · ` : '';
         showToast('已提取对话', `${rangeInfo}共 ${scraped.length} 字`, 'info');
     });
+
+    document.getElementById('cqst-mini-archive-text').addEventListener('input', updateArchiveCharCounters);
 
     document.getElementById('cqst-mini-summarize-btn').addEventListener('click', async () => {
         let raw = document.getElementById('cqst-mini-archive-text').value.trim();
         if (!raw) {
             raw = scrapeMiniChatByUI();
             document.getElementById('cqst-mini-archive-text').value = raw;
+            updateArchiveCharCounters();
         }
         const useAi = document.getElementById('cqst-mini-chk-aisum').checked;
         await runSummarizeOnlyFlow({
@@ -4987,6 +5155,7 @@ function bindBaseUIEvents() {
         if (!raw) {
             raw = scrapeMiniChatByUI();
             document.getElementById('cqst-mini-archive-text').value = raw;
+            updateArchiveCharCounters();
         }
         const useAi = document.getElementById('cqst-mini-chk-aisum').checked;
         const saved = await archiveMemorySlice({
@@ -4995,7 +5164,10 @@ function bindBaseUIEvents() {
             tags: Array.from(state.selectedTags),
             defaultEvent: '酒馆归档'
         });
-        if (saved) document.getElementById('cqst-mini-archive-text').value = '';
+        if (saved) {
+            document.getElementById('cqst-mini-archive-text').value = '';
+            updateArchiveCharCounters();
+        }
     });
 
     document.getElementById('cqst-mini-chk-autoinject').addEventListener('change', (e) => {
@@ -5221,7 +5393,8 @@ function bindTopDrawerEvents() {
         if (modeVal === 'unarchived') {
             return scrapeSillyTavernChat({ mode: 'unarchived', turns: 5, preset: draftPreset });
         }
-        return scrapeSillyTavernChat({ mode: 'recent', turns: modeVal === 'recent10' ? 10 : 5, preset: draftPreset });
+        const turns = modeVal === 'recent3' ? 3 : (modeVal === 'recent10' ? 10 : 5);
+        return scrapeSillyTavernChat({ mode: 'recent', turns, preset: draftPreset });
     };
 
     document.getElementById('cqst-top-btn-scrape').addEventListener('click', () => {
@@ -5231,10 +5404,13 @@ function bindTopDrawerEvents() {
             return;
         }
         document.getElementById('cqst-top-archive-preview').value = scraped;
+        updateArchiveCharCounters();
         const r = state.lastScrapedRange;
         const rangeInfo = r ? `第 ${r.startFloor}~${r.endFloor} 层（共 ${r.floorCount} 楼）· ` : '';
-        showToast('已提取对话', `${rangeInfo}共 ${scraped.length} 字，可直接点击「⚡ 归档记忆」`, 'info');
+        showToast('已提取对话', `${rangeInfo}共 ${scraped.length} 字，可直接点「📝 先总结预览」或「⚡ 一键归档」`, 'info');
     });
+
+    document.getElementById('cqst-top-archive-preview').addEventListener('input', updateArchiveCharCounters);
 
     const handleTopQuickTag = async () => {
         const input = document.getElementById('cqst-top-quick-tag-input');
@@ -5256,6 +5432,7 @@ function bindTopDrawerEvents() {
         if (!raw) {
             raw = scrapeTopChatByUI();
             document.getElementById('cqst-top-archive-preview').value = raw;
+            updateArchiveCharCounters();
         }
         const useAi = document.getElementById('cqst-top-chk-aisum').checked;
         await runSummarizeOnlyFlow({
@@ -5274,6 +5451,7 @@ function bindTopDrawerEvents() {
         if (!raw) {
             raw = scrapeTopChatByUI();
             document.getElementById('cqst-top-archive-preview').value = raw;
+            updateArchiveCharCounters();
         }
         const useAi = document.getElementById('cqst-top-chk-aisum').checked;
         const saved = await archiveMemorySlice({
@@ -5282,7 +5460,10 @@ function bindTopDrawerEvents() {
             tags: Array.from(state.selectedTags),
             defaultEvent: '酒馆归档'
         });
-        if (saved) document.getElementById('cqst-top-archive-preview').value = '';
+        if (saved) {
+            document.getElementById('cqst-top-archive-preview').value = '';
+            updateArchiveCharCounters();
+        }
     });
 
     document.getElementById('cqst-top-chk-autoarchive').addEventListener('change', (e) => {
@@ -5325,6 +5506,32 @@ function bindTopDrawerEvents() {
         state.toggledSliceIds.clear();
         renderDrawerSlices();
     });
+    document.getElementById('cqst-btn-toggle-batch-delete').addEventListener('click', () => {
+        state.batchDeleteMode = !state.batchDeleteMode;
+        if (!state.batchDeleteMode) state.selectedSliceIds.clear();
+        renderDrawerSlices();
+    });
+    document.getElementById('cqst-btn-batch-select-page').addEventListener('click', () => {
+        const filtered = getFilteredDrawerSlices();
+        const totalPages = Math.max(1, Math.ceil(filtered.length / SLICE_PAGE_SIZE));
+        const curPage = Math.max(1, Math.min(totalPages, state.slicePage || 1));
+        const pageItems = filtered.slice((curPage - 1) * SLICE_PAGE_SIZE, curPage * SLICE_PAGE_SIZE);
+        const allSelected = pageItems.length > 0 && pageItems.every(s => state.selectedSliceIds.has(s.id));
+        pageItems.forEach(s => {
+            if (allSelected) state.selectedSliceIds.delete(s.id);
+            else state.selectedSliceIds.add(s.id);
+        });
+        renderDrawerSlices();
+    });
+    document.getElementById('cqst-btn-batch-select-all').addEventListener('click', () => {
+        getFilteredDrawerSlices().forEach(s => state.selectedSliceIds.add(s.id));
+        renderDrawerSlices();
+    });
+    document.getElementById('cqst-btn-batch-clear').addEventListener('click', () => {
+        state.selectedSliceIds.clear();
+        renderDrawerSlices();
+    });
+    document.getElementById('cqst-btn-batch-confirm-delete').addEventListener('click', handleBatchDeleteSelectedSlices);
     document.getElementById('cqst-btn-add-manual-slice').addEventListener('click', () => openSliceModal(null));
 
     document.getElementById('cqst-btn-export-json').addEventListener('click', () => {
@@ -5738,7 +5945,7 @@ function bindTopDrawerEvents() {
         const minS = parseFloat(document.getElementById('cqst-cfg-minscore').value);
         state.config.minScore = Number.isFinite(minS) ? Math.min(0.95, Math.max(0, minS)) : 0.38;
         state.config.recallScanFloors = parseIntInRange(document.getElementById('cqst-cfg-scan-floors').value, 1, 12, 4);
-        state.config.autoTurns = parseIntInRange(document.getElementById('cqst-cfg-autoturns').value, 1, 50, 10);
+        state.config.autoTurns = parseIntInRange(document.getElementById('cqst-cfg-autoturns').value, 1, 50, 5);
         state.config.showRecallToast = document.getElementById('cqst-cfg-recall-toast').checked;
         state.config.showFloatingPill = document.getElementById('cqst-cfg-show-pill').checked;
         const rawSumPrompt = document.getElementById('cqst-cfg-summary-prompt').value.trim();
@@ -5806,6 +6013,8 @@ async function onChatChanged() {
     state.lastCountedMesIndex = -1;
     state.slicePage = 1;
     state.toggledSliceIds.clear();
+    state.batchDeleteMode = false;
+    state.selectedSliceIds.clear();
     clearMountedRecall({ clearPreview: true });
 
     const resolved = resolveCompartmentForChat();
@@ -5836,7 +6045,7 @@ async function onCharacterMessageRendered(messageId) {
     state.lastCountedMesIndex = curIdx;
     state.turnCounter += 1;
 
-    const targetTurns = parseIntInRange(state.config.autoTurns, 1, 50, 10);
+    const targetTurns = parseIntInRange(state.config.autoTurns, 1, 50, 5);
     if (state.turnCounter < targetTurns) return;
 
     state.turnCounter = 0;
