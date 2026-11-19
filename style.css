@@ -277,6 +277,27 @@ html[data-cqst-theme="night"] {
     color: var(--cqst-text-strong);
     text-align: center;
     padding: 0 16px;
+    max-width: min(460px, calc(100vw - 32px));
+    word-break: break-word;
+}
+
+.cqst-loading-meta {
+    font-family: var(--cqst-font-mono);
+    font-size: 11.5px;
+    color: var(--cqst-text-light);
+    background: rgba(var(--cqst-rgb-bg-light), 0.85);
+    border: 1px solid var(--cqst-border);
+    border-radius: 50px;
+    padding: 2px 10px;
+}
+
+.cqst-loading-meta:empty {
+    display: none;
+}
+
+#cqst-loading-cancel-btn {
+    margin-top: 2px;
+    background: rgba(var(--cqst-rgb-bg-light), 0.94);
 }
 
 /* ============================================================================
@@ -1056,6 +1077,81 @@ input[type="checkbox"].cqst-checkbox:checked::after {
     border-bottom: none;
 }
 
+/* 总结草稿预览区（先总结、后手动确认存入） */
+.cqst-draft-box {
+    background: var(--cqst-bg-input);
+    border: 1px dashed var(--cqst-bot-border);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.cqst-draft-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.cqst-draft-meta {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--cqst-bot-text);
+    min-width: 0;
+    word-break: break-word;
+}
+
+.cqst-draft-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.cqst-draft-item {
+    background: var(--cqst-bg-light);
+    border: 1px solid var(--cqst-border);
+    border-radius: 6px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+
+.cqst-draft-item-head {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.cqst-draft-idx {
+    font-family: var(--cqst-font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 50px;
+    background: rgba(var(--cqst-rgb-brown-light), 0.16);
+    color: var(--cqst-text-strong);
+    flex-shrink: 0;
+}
+
+.cqst-draft-event,
+.cqst-draft-tags {
+    min-width: 0;
+    flex: 1 1 110px;
+}
+
 .cqst-slice-card {
     background: var(--cqst-bg-light);
     border-radius: 6px;
@@ -1446,6 +1542,15 @@ input[type="checkbox"].cqst-checkbox:checked::after {
 
     .cqst-modal-footer {
         padding: 10px 14px;
+    }
+
+    .cqst-draft-list {
+        max-height: 260px;
+    }
+
+    .cqst-draft-event,
+    .cqst-draft-tags {
+        flex: 1 1 100%;
     }
 
     .cqst-form-grid-2 {

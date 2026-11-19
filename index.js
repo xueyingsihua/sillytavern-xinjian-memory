@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.4';
+const PLUGIN_VERSION = '1.0.5';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -144,6 +144,7 @@ const state = {
     panelOpen: false,
     topDrawerOpen: false,
     activePanoramaTab: 'archive',
+    pendingDrafts: null,
     initialized: false
 };
 
@@ -371,19 +372,137 @@ function openCQModal(modalOrId) {
     requestAnimationFrame(() => syncFixedOverlayToViewport(modal));
 }
 
-function showLoading(sceneText = 'LOADING SCENE', subText = '正在同步记忆与向量...') {
+let activeLoadingAbort = null;
+let loadingTimerId = null;
+let loadingStartMs = 0;
+
+function isAbortError(err) {
+    return Boolean(err && (err.name === 'AbortError' || err.cqstAborted));
+}
+
+function createAbortError(msg = '已手动取消当前操作') {
+    const err = new Error(msg);
+    err.name = 'AbortError';
+    err.cqstAborted = true;
+    return err;
+}
+
+async function fetchWithTimeout(url, options = {}, { timeoutMs = 45000, signal = null, label = '网络请求' } = {}) {
+    if (signal?.aborted) throw createAbortError();
+
+    const ctrl = new AbortController();
+    let timedOut = false;
+    let userAborted = false;
+    const timer = setTimeout(() => {
+        timedOut = true;
+        try { ctrl.abort(); } catch (e) {}
+    }, timeoutMs);
+
+    const onExternalAbort = () => {
+        userAborted = true;
+        try { ctrl.abort(); } catch (e) {}
+    };
+    if (signal) signal.addEventListener('abort', onExternalAbort, { once: true });
+
+    try {
+        return await fetch(url, { ...options, signal: ctrl.signal });
+    } catch (err) {
+        if (userAborted || signal?.aborted) throw createAbortError();
+        if (timedOut) {
+            throw new Error(`${label}超时（超过 ${Math.round(timeoutMs / 1000)} 秒），请检查接口地址、Key 或网络代理`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onExternalAbort);
+    }
+}
+
+function raceWithSignalAndTimeout(promise, { timeoutMs = 90000, signal = null, label = '请求' } = {}) {
+    if (signal?.aborted) return Promise.reject(createAbortError());
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+            clearTimeout(timer);
+            if (signal) signal.removeEventListener('abort', onAbort);
+        };
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(new Error(`${label}超时（超过 ${Math.round(timeoutMs / 1000)} 秒），请检查接口状态或网络`));
+        }, timeoutMs);
+        const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(createAbortError());
+        };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+        Promise.resolve(promise).then(
+            val => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(val);
+            },
+            err => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                reject(err);
+            }
+        );
+    });
+}
+
+function updateLoading(sceneText, subText) {
+    const box = document.getElementById('cqst-loading-box');
+    const sub = document.getElementById('cqst-loading-sub');
+    if (sceneText && box) box.setAttribute('data-text', sceneText);
+    if (subText !== undefined && sub) sub.textContent = subText;
+}
+
+function showLoading(sceneText = 'LOADING SCENE', subText = '正在同步记忆与向量...', { abortController = null } = {}) {
     const backdrop = document.getElementById('cqst-loading-backdrop');
     const box = document.getElementById('cqst-loading-box');
     const sub = document.getElementById('cqst-loading-sub');
+    const meta = document.getElementById('cqst-loading-meta');
+    const cancelBtn = document.getElementById('cqst-loading-cancel-btn');
     if (!backdrop || !box || !sub) return;
+
     box.setAttribute('data-text', sceneText);
     sub.textContent = subText;
+    activeLoadingAbort = abortController || null;
+    if (cancelBtn) cancelBtn.style.display = activeLoadingAbort ? 'inline-flex' : 'none';
+
+    if (loadingTimerId) {
+        clearInterval(loadingTimerId);
+        loadingTimerId = null;
+    }
+    loadingStartMs = Date.now();
+    if (meta) meta.textContent = '已耗时 0.0s';
+    loadingTimerId = setInterval(() => {
+        const metaEl = document.getElementById('cqst-loading-meta');
+        if (metaEl) metaEl.textContent = `已耗时 ${((Date.now() - loadingStartMs) / 1000).toFixed(1)}s`;
+    }, 200);
+
     backdrop.classList.add('open');
     syncFixedOverlayToViewport(backdrop);
     requestAnimationFrame(() => syncFixedOverlayToViewport(backdrop));
 }
 
 function hideLoading() {
+    if (loadingTimerId) {
+        clearInterval(loadingTimerId);
+        loadingTimerId = null;
+    }
+    activeLoadingAbort = null;
+    const cancelBtn = document.getElementById('cqst-loading-cancel-btn');
+    if (cancelBtn) cancelBtn.style.display = 'none';
+    const meta = document.getElementById('cqst-loading-meta');
+    if (meta) meta.textContent = '';
     const backdrop = document.getElementById('cqst-loading-backdrop');
     if (backdrop) backdrop.classList.remove('open');
 }
@@ -666,7 +785,7 @@ function mergeSlicesNonDestructive(remoteSlices = [], localSlices = []) {
     return Array.from(byId.values());
 }
 
-async function githubReadBlobFallback(repo, pat, path, knownSha = null) {
+async function githubReadBlobFallback(repo, pat, path, knownSha = null, { signal = null } = {}) {
     let sha = knownSha;
     if (!sha) {
         const parts = path.split('/');
@@ -675,18 +794,18 @@ async function githubReadBlobFallback(repo, pat, path, knownSha = null) {
         const dirUrl = dirPath
             ? `https://api.github.com/repos/${repo}/contents/${encodeGithubPath(dirPath)}?t=${Date.now()}`
             : `https://api.github.com/repos/${repo}/contents?t=${Date.now()}`;
-        const dirRes = await fetch(dirUrl, {
+        const dirRes = await fetchWithTimeout(dirUrl, {
             headers: { 'Authorization': `Bearer ${pat}`, 'Accept': 'application/vnd.github+json' }
-        });
+        }, { timeoutMs: 25000, signal, label: 'GitHub 接口' });
         if (!dirRes.ok) throw new Error(`GitHub 目录定位失败 (${dirRes.status})`);
         const items = await dirRes.json();
         const match = Array.isArray(items) && items.find(i => i.path === path || i.name === fileName);
         if (!match || !match.sha) return null;
         sha = match.sha;
     }
-    const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${sha}`, {
+    const blobRes = await fetchWithTimeout(`https://api.github.com/repos/${repo}/git/blobs/${sha}`, {
         headers: { 'Authorization': `Bearer ${pat}`, 'Accept': 'application/vnd.github+json' }
-    });
+    }, { timeoutMs: 25000, signal, label: 'GitHub 接口' });
     if (!blobRes.ok) throw new Error(`GitHub Blob 读取失败 (${blobRes.status})`);
     const blobData = await blobRes.json();
     return {
@@ -695,21 +814,21 @@ async function githubReadBlobFallback(repo, pat, path, knownSha = null) {
     };
 }
 
-async function githubGetFile(path) {
+async function githubGetFile(path, { signal = null } = {}) {
     const repo = state.config.githubRepo.trim();
     const pat = state.config.githubPat.trim();
     const url = `https://api.github.com/repos/${repo}/contents/${encodeGithubPath(path)}?t=${Date.now()}`;
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         headers: {
             'Authorization': `Bearer ${pat}`,
             'Accept': 'application/vnd.github+json'
         }
-    });
+    }, { timeoutMs: 25000, signal, label: 'GitHub 接口' });
     if (res.status === 404) return null;
     if (res.status === 403) {
         const errText = await res.text();
         if (errText.includes('too_large')) {
-            return await githubReadBlobFallback(repo, pat, path, null);
+            return await githubReadBlobFallback(repo, pat, path, null, { signal });
         }
         throw new Error(`GitHub 读取失败 (${res.status}): ${errText.slice(0, 140)}`);
     }
@@ -719,7 +838,7 @@ async function githubGetFile(path) {
     }
     const data = await res.json();
     if (!data.content || data.encoding === 'none') {
-        return await githubReadBlobFallback(repo, pat, path, data.sha || null);
+        return await githubReadBlobFallback(repo, pat, path, data.sha || null, { signal });
     }
     return {
         json: JSON.parse(base64ToUtf8(data.content)),
@@ -727,14 +846,17 @@ async function githubGetFile(path) {
     };
 }
 
-async function githubPutFile(path, jsonData, sha = null, commitMsg = 'Sync from SillyTavern Chuqing RAG') {
+async function githubPutFile(path, jsonData, sha = null, commitMsg = 'Sync from SillyTavern Chuqing RAG', { signal = null, skipShaLookup = false } = {}) {
     const repo = state.config.githubRepo.trim();
     const pat = state.config.githubPat.trim();
     const url = `https://api.github.com/repos/${repo}/contents/${encodeGithubPath(path)}`;
 
     let latestSha = sha;
-    if (!latestSha) {
-        const existing = await githubGetFile(path).catch(() => null);
+    if (!latestSha && !skipShaLookup) {
+        const existing = await githubGetFile(path, { signal }).catch(e => {
+            if (isAbortError(e)) throw e;
+            return null;
+        });
         if (existing?.sha) latestSha = existing.sha;
     }
 
@@ -744,7 +866,7 @@ async function githubPutFile(path, jsonData, sha = null, commitMsg = 'Sync from 
     };
     if (latestSha) bodyObj.sha = latestSha;
 
-    let res = await fetch(url, {
+    let res = await fetchWithTimeout(url, {
         method: 'PUT',
         headers: {
             'Authorization': `Bearer ${pat}`,
@@ -752,13 +874,16 @@ async function githubPutFile(path, jsonData, sha = null, commitMsg = 'Sync from 
             'Content-Type': 'application/json'
         },
         body: JSON.stringify(bodyObj)
-    });
+    }, { timeoutMs: 25000, signal, label: 'GitHub 接口' });
 
     if (res.status === 409) {
-        const latest = await githubGetFile(path).catch(() => null);
+        const latest = await githubGetFile(path, { signal }).catch(e => {
+            if (isAbortError(e)) throw e;
+            return null;
+        });
         if (latest?.sha) {
             bodyObj.sha = latest.sha;
-            res = await fetch(url, {
+            res = await fetchWithTimeout(url, {
                 method: 'PUT',
                 headers: {
                     'Authorization': `Bearer ${pat}`,
@@ -766,7 +891,7 @@ async function githubPutFile(path, jsonData, sha = null, commitMsg = 'Sync from 
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(bodyObj)
-            });
+            }, { timeoutMs: 25000, signal, label: 'GitHub 接口' });
         }
     }
 
@@ -778,18 +903,21 @@ async function githubPutFile(path, jsonData, sha = null, commitMsg = 'Sync from 
     return result.content?.sha || null;
 }
 
-async function githubDeleteFile(path, sha = null, commitMsg = 'Delete compartment via Chuqing ST RAG') {
+async function githubDeleteFile(path, sha = null, commitMsg = 'Delete compartment via Chuqing ST RAG', { signal = null } = {}) {
     if (!isGithubConfigured()) return;
     const repo = state.config.githubRepo.trim();
     const pat = state.config.githubPat.trim();
     let targetSha = sha;
     if (!targetSha) {
-        const existing = await githubGetFile(path).catch(() => null);
+        const existing = await githubGetFile(path, { signal }).catch(e => {
+            if (isAbortError(e)) throw e;
+            return null;
+        });
         if (!existing?.sha) return;
         targetSha = existing.sha;
     }
     const url = `https://api.github.com/repos/${repo}/contents/${encodeGithubPath(path)}`;
-    await fetch(url, {
+    await fetchWithTimeout(url, {
         method: 'DELETE',
         headers: {
             'Authorization': `Bearer ${pat}`,
@@ -797,20 +925,20 @@ async function githubDeleteFile(path, sha = null, commitMsg = 'Delete compartmen
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({ message: commitMsg, sha: targetSha })
-    });
+    }, { timeoutMs: 25000, signal, label: 'GitHub 接口' });
 }
 
-async function githubListBranchFiles(dir = getGithubBranchDir()) {
+async function githubListBranchFiles(dir = getGithubBranchDir(), { signal = null } = {}) {
     if (!isGithubConfigured()) return [];
     const repo = state.config.githubRepo.trim();
     const pat = state.config.githubPat.trim();
     try {
-        const res = await fetch(`https://api.github.com/repos/${repo}/contents/${encodeGithubPath(dir)}?t=${Date.now()}`, {
+        const res = await fetchWithTimeout(`https://api.github.com/repos/${repo}/contents/${encodeGithubPath(dir)}?t=${Date.now()}`, {
             headers: {
                 'Authorization': `Bearer ${pat}`,
                 'Accept': 'application/vnd.github+json'
             }
-        });
+        }, { timeoutMs: 25000, signal, label: 'GitHub 接口' });
         if (!res.ok) return [];
         const items = await res.json();
         if (!Array.isArray(items)) return [];
@@ -818,6 +946,7 @@ async function githubListBranchFiles(dir = getGithubBranchDir()) {
             .filter(item => item.type === 'file' && typeof item.name === 'string' && item.name.endsWith('.json'))
             .map(item => item.name.slice(0, -5));
     } catch (e) {
+        if (isAbortError(e)) throw e;
         return [];
     }
 }
@@ -870,14 +999,16 @@ async function syncGlobalProfileFromGithub() {
     saveSettings();
 }
 
-async function pushGlobalProfileIfGithub(commitMsg = 'Update global_profile.json') {
+async function pushGlobalProfileIfGithub(commitMsg = 'Update global_profile.json', { signal = null } = {}) {
     saveSettings();
     if (!isGithubModeActive()) return;
     const profilePath = getGithubProfilePath();
     if (!state.globalProfile.sha) {
-        await syncGlobalProfileFromGithub().catch(() => {});
+        await syncGlobalProfileFromGithub().catch(e => {
+            if (isAbortError(e)) throw e;
+        });
     }
-    state.globalProfile.sha = await githubPutFile(profilePath, buildGlobalProfilePayload(), state.globalProfile.sha, commitMsg);
+    state.globalProfile.sha = await githubPutFile(profilePath, buildGlobalProfilePayload(), state.globalProfile.sha, commitMsg, { signal });
     saveSettings();
 }
 
@@ -949,23 +1080,28 @@ async function loadCompartment(name, { forceRemote = false } = {}) {
     return state.branchCache[target].slices || [];
 }
 
-async function saveCompartment(name, slices, commitMsg = 'Update memory slice') {
+async function saveCompartment(name, slices, commitMsg = 'Update memory slice', { signal = null, onStage = null } = {}) {
     const target = sanitizeCompartmentName(name);
     ensureCompartmentRegistered(target);
     let finalSlices = Array.isArray(slices) ? slices : [];
     state.branchCache[target].slices = finalSlices;
     state.branchCache[target].loaded = true;
 
+    onStage?.('SAVING LOCAL', `正在写入本地 IndexedDB（共 ${finalSlices.length} 条）...`);
     await idbPutCompartment(target, finalSlices);
     saveSettings();
 
     if (isGithubModeActive()) {
+        onStage?.('SYNCING GITHUB', `正在上传隔间 [${target}] 到 GitHub 仓库...`);
         const path = getGithubBranchPath(target);
         const remoteKey = getGithubRemoteKey(path);
         let targetSha = state.branchCache[target].sha || null;
 
         if (!targetSha) {
-            const existingRemote = await githubGetFile(path).catch(() => null);
+            const existingRemote = await githubGetFile(path, { signal }).catch(e => {
+                if (isAbortError(e)) throw e;
+                return null;
+            });
             if (existingRemote?.json) {
                 const remoteSlices = Array.isArray(existingRemote.json) ? existingRemote.json : (existingRemote.json.slices || []);
                 finalSlices = mergeSlicesNonDestructive(remoteSlices, finalSlices);
@@ -974,7 +1110,7 @@ async function saveCompartment(name, slices, commitMsg = 'Update memory slice') 
             }
         }
 
-        const newSha = await githubPutFile(path, finalSlices, targetSha, commitMsg);
+        const newSha = await githubPutFile(path, finalSlices, targetSha, commitMsg, { signal, skipShaLookup: true });
         state.branchCache[target].sha = newSha;
         await idbPutCompartment(target, finalSlices, newSha, remoteKey);
     }
@@ -1280,7 +1416,43 @@ function getEmbedApiConfig() {
     return resolveApiEndpoint(ep, state.config.embedKey || state.config.geminiKey, state.config.embedBase);
 }
 
-async function getEmbeddingVector(text, strict = false) {
+function describeSummaryProvider() {
+    const provider = state.config.apiProvider || 'gemini';
+    if (provider === 'st_current') return '酒馆当前主API';
+    const cfg = getChatApiConfig();
+    const rawModel = (state.config.chatModel || '').trim();
+    if (cfg.useOpenAI) {
+        const model = (!rawModel || rawModel.startsWith('gemini-'))
+            ? (cfg.provider === 'openai' ? 'gpt-4o-mini' : 'Qwen/Qwen2.5-7B-Instruct')
+            : rawModel;
+        const name = cfg.provider === 'openai' ? 'OpenAI反代' : '硅基流动';
+        return `${name} · ${model}`;
+    }
+    const model = rawModel || 'gemini-2.5-flash';
+    return `Gemini · ${model}`;
+}
+
+function describeEmbedProvider() {
+    const cfg = getEmbedApiConfig();
+    if (cfg.provider === 'local' || !cfg.key) return '本地特征向量(离线)';
+    const rawModel = (state.config.embedModel || '').trim();
+    if (cfg.useOpenAI) {
+        const embedModel = (!rawModel || rawModel.includes('text-embedding-004') || rawModel.includes('gemini-embedding'))
+            ? (cfg.provider === 'openai' ? 'text-embedding-3-small' : 'BAAI/bge-m3')
+            : rawModel;
+        const name = cfg.provider === 'openai' ? 'OpenAI反代' : '硅基流动';
+        return `${name} · ${embedModel}`;
+    }
+    const model = rawModel || 'text-embedding-004';
+    return `Gemini · ${model}`;
+}
+
+async function getEmbeddingVector(text, strictOrOpts = false) {
+    const opts = (strictOrOpts && typeof strictOrOpts === 'object')
+        ? strictOrOpts
+        : { strict: Boolean(strictOrOpts) };
+    const { strict = false, signal = null, onProgress = null, onFallback = null } = opts;
+
     const cfg = getEmbedApiConfig();
     if (cfg.provider === 'local' || !cfg.key) {
         if (strict && cfg.provider !== 'local') throw new Error('未配置向量 API Key');
@@ -1294,48 +1466,54 @@ async function getEmbeddingVector(text, strict = false) {
             : rawModel;
         let lastErr = '向量接口返回空数据';
         try {
-            const res = await fetch(`${cfg.base}/embeddings`, {
+            const res = await fetchWithTimeout(`${cfg.base}/embeddings`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${cfg.key}`
                 },
                 body: JSON.stringify({ model: embedModel, input: text, encoding_format: 'float' })
-            });
+            }, { timeoutMs: 25000, signal, label: '向量接口' });
             if (res.ok) {
                 const data = await res.json();
                 const emb = data.data?.[0]?.embedding;
                 if (Array.isArray(emb)) return compactVector(emb);
             } else {
-                lastErr = `HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`;
+                lastErr = `HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 120)}`;
             }
         } catch (e) {
+            if (isAbortError(e)) throw e;
             lastErr = e.message || String(e);
         }
         if (strict) throw new Error(lastErr);
+        onFallback?.(lastErr);
         return computeLocalFallbackVector(text);
     }
 
     const models = Array.from(new Set([state.config.embedModel || 'text-embedding-004', 'gemini-embedding-001']));
     let lastGeminiErr = 'Gemini Embedding 调用失败';
-    for (const m of models) {
+    for (let i = 0; i < models.length; i++) {
+        const m = models[i];
+        if (i > 0) onProgress?.(`尝试备用向量模型 ${m}...`);
         try {
-            const res = await fetch(`${cfg.base}/v1beta/models/${m}:embedContent?key=${encodeURIComponent(cfg.key)}`, {
+            const res = await fetchWithTimeout(`${cfg.base}/v1beta/models/${m}:embedContent?key=${encodeURIComponent(cfg.key)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ model: `models/${m}`, content: { parts: [{ text }] } })
-            });
+            }, { timeoutMs: 25000, signal, label: '向量接口' });
             if (res.ok) {
                 const data = await res.json();
                 if (Array.isArray(data.embedding?.values)) return compactVector(data.embedding.values);
             } else {
-                lastGeminiErr = `HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`;
+                lastGeminiErr = `HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 120)}`;
             }
         } catch (e) {
+            if (isAbortError(e)) throw e;
             lastGeminiErr = e.message || String(e);
         }
     }
     if (strict) throw new Error(lastGeminiErr);
+    onFallback?.(lastGeminiErr);
     return computeLocalFallbackVector(text);
 }
 
@@ -1370,7 +1548,7 @@ async function rerankCandidates(queryText, coarseItems, topK, threshold) {
             const tagsStr = (c.slice.tags || []).map(t => `#${t}`).join(' ');
             return `${c.slice.date ? '[' + c.slice.date + '] ' : ''}${tagsStr ? tagsStr + ' ' : ''}${c.slice.text || ''}`;
         });
-        const res = await fetch(`${cfg.base}/rerank`, {
+        const res = await fetchWithTimeout(`${cfg.base}/rerank`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1383,7 +1561,7 @@ async function rerankCandidates(queryText, coarseItems, topK, threshold) {
                 top_n: docs.length,
                 return_documents: false
             })
-        });
+        }, { timeoutMs: 15000, label: '重排接口' });
         if (!res.ok) return null;
         const data = await res.json();
         if (!Array.isArray(data.results) || !data.results.length) return null;
@@ -1515,7 +1693,7 @@ function splitSummaryChunks(rawText, maxChunkChars = 7500) {
     return chunks.length ? chunks : [text];
 }
 
-async function invokeSummaryApi(sys, chunkText) {
+async function invokeSummaryApi(sys, chunkText, { signal = null } = {}) {
     const provider = state.config.apiProvider || 'gemini';
 
     if (provider === 'st_current') {
@@ -1526,9 +1704,10 @@ async function invokeSummaryApi(sys, chunkText) {
         const combined = `${sys}\n\n待提取对话：\n${chunkText}`;
         const fnSrc = Function.prototype.toString.call(ctx.generateQuietPrompt);
         const usesOptionsObj = /^\s*(async\s+)?\w*\s*\(\s*\{/.test(fnSrc);
-        const reply = usesOptionsObj
-            ? await ctx.generateQuietPrompt({ quietPrompt: combined, skipWIAN: true })
-            : await ctx.generateQuietPrompt(combined, false, true);
+        const quietCall = usesOptionsObj
+            ? ctx.generateQuietPrompt({ quietPrompt: combined, skipWIAN: true })
+            : ctx.generateQuietPrompt(combined, false, true);
+        const reply = await raceWithSignalAndTimeout(quietCall, { timeoutMs: 90000, signal, label: '酒馆主 API 总结' });
         return String(reply || '');
     }
 
@@ -1538,7 +1717,7 @@ async function invokeSummaryApi(sys, chunkText) {
         const model = (!rawModel || rawModel.startsWith('gemini-'))
             ? (cfg.provider === 'openai' ? 'gpt-4o-mini' : 'Qwen/Qwen2.5-7B-Instruct')
             : rawModel;
-        const res = await fetch(`${cfg.base}/chat/completions`, {
+        const res = await fetchWithTimeout(`${cfg.base}/chat/completions`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1551,14 +1730,17 @@ async function invokeSummaryApi(sys, chunkText) {
                     { role: 'user', content: chunkText }
                 ]
             })
-        });
-        if (!res.ok) throw new Error(`总结接口调用失败 (${res.status})`);
+        }, { timeoutMs: 90000, signal, label: '总结接口' });
+        if (!res.ok) {
+            const errBody = (await res.text().catch(() => '')).slice(0, 140);
+            throw new Error(`总结接口调用失败 (${res.status})${errBody ? `: ${errBody}` : ''}`);
+        }
         const data = await res.json();
         return data.choices?.[0]?.message?.content || '';
     }
 
     const model = (state.config.chatModel || '').trim() || 'gemini-2.5-flash';
-    const res = await fetch(`${cfg.base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(cfg.key)}`, {
+    const res = await fetchWithTimeout(`${cfg.base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(cfg.key)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1572,8 +1754,11 @@ async function invokeSummaryApi(sys, chunkText) {
                 { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' }
             ]
         })
-    });
-    if (!res.ok) throw new Error(`Gemini 总结失败 (${res.status})`);
+    }, { timeoutMs: 90000, signal, label: 'Gemini 总结接口' });
+    if (!res.ok) {
+        const errBody = (await res.text().catch(() => '')).slice(0, 140);
+        throw new Error(`Gemini 总结失败 (${res.status})${errBody ? `: ${errBody}` : ''}`);
+    }
     const data = await res.json();
     return data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
 }
@@ -1596,25 +1781,27 @@ function buildSummarySystemPrompt() {
     return sys;
 }
 
-async function callSummaryModel(rawText) {
+async function callSummaryModel(rawText, { signal = null, onProgress = null } = {}) {
     const fallbackTags = Array.from(state.selectedTags);
     const provider = state.config.apiProvider || 'gemini';
+    const providerLabel = describeSummaryProvider();
     if (provider !== 'st_current' && !getChatApiConfig().key) {
         const single = {
             text: String(rawText || '').slice(0, 220),
             tags: fallbackTags.length ? fallbackTags : ['日常点滴'],
             event: '对话归档'
         };
-        return { slices: [single], ...single };
+        return { slices: [single], ...single, usedAi: false, noKeyFallback: true, providerLabel };
     }
 
     const sys = buildSummarySystemPrompt();
 
     const chunks = splitSummaryChunks(rawText, 7500);
     const allSlices = [];
-    for (const chunk of chunks) {
-        const reply = await invokeSummaryApi(sys, chunk);
-        const parsed = parseAiSlicesResponse(reply, chunk, fallbackTags);
+    for (let i = 0; i < chunks.length; i++) {
+        onProgress?.(i + 1, chunks.length, providerLabel);
+        const reply = await invokeSummaryApi(sys, chunks[i], { signal });
+        const parsed = parseAiSlicesResponse(reply, chunks[i], fallbackTags);
         allSlices.push(...parsed);
     }
 
@@ -1627,7 +1814,10 @@ async function callSummaryModel(rawText) {
         slices: allSlices.length ? allSlices : [first],
         text: first.text,
         tags: first.tags,
-        event: first.event
+        event: first.event,
+        usedAi: true,
+        noKeyFallback: false,
+        providerLabel
     };
 }
 
@@ -1918,6 +2108,167 @@ globalThis.chuqingMemoryInterceptor = chuqingMemoryInterceptor;
 /* ============================================================================
    9. 记忆归档业务流程
    ============================================================================ */
+async function summarizeToDraftSlices({ rawText, useAiSummary = true, tags = [], eventName = '', defaultEvent = '剧情归档', signal = null, onStage = null }) {
+    const cleanRaw = (rawText || '').trim();
+    const manualTags = tags.length ? [...tags] : ['日常点滴'];
+    const today = getTodayDate();
+    const t0 = performance.now();
+
+    if (!useAiSummary) {
+        return {
+            items: [{
+                id: generateUUID(),
+                event: (eventName || defaultEvent || '剧情归档').trim(),
+                text: cleanRaw,
+                tags: manualTags,
+                date: today
+            }],
+            newTagsToAdd: [],
+            elapsedMs: 0,
+            usedAi: false,
+            noKeyFallback: false,
+            providerLabel: '原文直出（未调用 AI）'
+        };
+    }
+
+    const sum = await callSummaryModel(cleanRaw, {
+        signal,
+        onProgress: (idx, total, label) => {
+            onStage?.('SUMMARIZING', total > 1
+                ? `正在 AI 总结提炼第 ${idx}/${total} 段（${label}）...`
+                : `正在调用 AI 总结提炼（${label}）...`);
+        }
+    });
+
+    const sliceList = Array.isArray(sum.slices) && sum.slices.length
+        ? sum.slices
+        : [{ text: sum.text || cleanRaw, tags: sum.tags || manualTags, event: sum.event || '' }];
+    const isMulti = sliceList.length > 1;
+    const newTagsToAdd = [];
+
+    const items = sliceList.map(item => {
+        const aiTags = Array.isArray(item.tags) ? item.tags.filter(Boolean) : [];
+        const mergedTags = isMulti
+            ? (aiTags.length ? aiTags : manualTags)
+            : Array.from(new Set([...manualTags, ...aiTags]));
+        mergedTags.forEach(t => {
+            if (t && !state.globalProfile.customTags.includes(t) && !newTagsToAdd.includes(t)) {
+                newTagsToAdd.push(t);
+            }
+        });
+        return {
+            id: generateUUID(),
+            event: (eventName || item.event || defaultEvent || '剧情归档').trim(),
+            text: item.text || cleanRaw,
+            tags: mergedTags.length ? mergedTags : ['日常点滴'],
+            date: today
+        };
+    });
+
+    return {
+        items,
+        newTagsToAdd,
+        elapsedMs: Math.round(performance.now() - t0),
+        usedAi: Boolean(sum.usedAi),
+        noKeyFallback: Boolean(sum.noKeyFallback),
+        providerLabel: sum.providerLabel || describeSummaryProvider()
+    };
+}
+
+async function saveDraftSlicesToCompartment(draftItems, { signal = null, onStage = null, newTagsToAdd = [] } = {}) {
+    const validItems = (Array.isArray(draftItems) ? draftItems : [])
+        .map(item => {
+            const rawTags = Array.isArray(item?.tags)
+                ? item.tags
+                : String(item?.tags || '').split(/[,，、]+/);
+            const cleanTags = Array.from(new Set(rawTags.map(t => String(t || '').trim().replace(/^#+/, '')).filter(Boolean)));
+            return {
+                id: item?.id || generateUUID(),
+                text: String(item?.text || '').trim(),
+                date: String(item?.date || '').trim() || getTodayDate(),
+                event: String(item?.event || '').trim() || '剧情归档',
+                tags: cleanTags.length ? cleanTags : ['日常点滴']
+            };
+        })
+        .filter(item => item.text.length > 0);
+
+    if (validItems.length === 0) {
+        throw new Error('没有可保存的有效记忆内容');
+    }
+
+    const pendingNewTags = Array.from(new Set([
+        ...(Array.isArray(newTagsToAdd) ? newTagsToAdd : []),
+        ...validItems.flatMap(item => item.tags)
+    ])).filter(t => t && !state.globalProfile.customTags.includes(t));
+
+    if (pendingNewTags.length > 0) {
+        state.globalProfile.customTags.push(...pendingNewTags);
+        if (isGithubModeActive()) {
+            onStage?.('SYNCING TAGS', '正在同步新增标签到 GitHub...');
+        }
+        await pushGlobalProfileIfGithub('Add AI generated tags', { signal });
+    }
+
+    const embedT0 = performance.now();
+    const embedLabel = describeEmbedProvider();
+    let fallbackCount = 0;
+    let lastFallbackErr = '';
+    const createdSlices = [];
+
+    for (let i = 0; i < validItems.length; i++) {
+        const item = validItems[i];
+        onStage?.('EMBEDDING', `正在计算第 ${i + 1}/${validItems.length} 条向量（${embedLabel}）...`);
+        const vec = await getEmbeddingVector(`${item.event} ${item.tags.join(' ')} ${item.text}`, {
+            signal,
+            onProgress: (msg) => onStage?.('EMBEDDING', `第 ${i + 1}/${validItems.length} 条：${msg}`),
+            onFallback: (reason) => {
+                fallbackCount++;
+                lastFallbackErr = reason || '向量接口异常';
+            }
+        });
+        createdSlices.push({
+            id: item.id,
+            text: item.text,
+            date: item.date,
+            tags: item.tags,
+            event: item.event,
+            vector: vec
+        });
+    }
+    const embedMs = Math.round(performance.now() - embedT0);
+
+    const saveT0 = performance.now();
+    const curSlices = [...getCachedSlices(state.currentCompartment), ...createdSlices];
+    await saveCompartment(
+        state.currentCompartment,
+        curSlices,
+        `Archive ${createdSlices.length} slice(s) to ${state.currentCompartment}`,
+        { signal, onStage }
+    );
+    const saveMs = Math.round(performance.now() - saveT0);
+
+    const rawChatId = state.currentChatIdentity.rawChatId;
+    if (rawChatId && state.lastScrapedRange && state.lastScrapedRange.chatId === rawChatId) {
+        const prev = state.lastArchivedFloorMap[rawChatId];
+        state.lastArchivedFloorMap[rawChatId] = Number.isFinite(prev)
+            ? Math.max(prev, state.lastScrapedRange.endFloor)
+            : state.lastScrapedRange.endFloor;
+    }
+    state.lastScrapedRange = null;
+    state.turnCounter = 0;
+    saveSettings();
+    renderAllUI();
+
+    return {
+        createdSlices,
+        totalCount: curSlices.length,
+        embedMs,
+        saveMs,
+        fallbackCount,
+        lastFallbackErr
+    };
+}
+
 async function archiveMemorySlice({ rawText, useAiSummary = true, tags = [], eventName = '', defaultEvent = '剧情归档', silent = false }) {
     const cleanRaw = (rawText || '').trim();
     if (!cleanRaw) {
@@ -1925,92 +2276,264 @@ async function archiveMemorySlice({ rawText, useAiSummary = true, tags = [], eve
         return null;
     }
 
-    if (!silent) showLoading('VECTORIZING', '正在拆分提炼记忆切片并计算向量...');
+    const abortController = !silent ? new AbortController() : null;
+    if (!silent) {
+        const initMsg = useAiSummary
+            ? `[1/3] 正在调用 AI 总结（${describeSummaryProvider()}）...`
+            : `[1/2] 正在计算向量（${describeEmbedProvider()}）...`;
+        showLoading(useAiSummary ? 'SUMMARIZING' : 'EMBEDDING', initMsg, { abortController });
+    }
+
     try {
-        const manualTags = tags.length ? [...tags] : ['日常点滴'];
-        let itemsToSave = [];
-
-        if (useAiSummary) {
-            const sum = await callSummaryModel(cleanRaw);
-            const sliceList = Array.isArray(sum.slices) && sum.slices.length
-                ? sum.slices
-                : [{ text: sum.text || cleanRaw, tags: sum.tags || manualTags, event: sum.event || '' }];
-            const isMulti = sliceList.length > 1;
-            const newTagsToAdd = [];
-
-            itemsToSave = sliceList.map(item => {
-                const aiTags = Array.isArray(item.tags) ? item.tags.filter(Boolean) : [];
-                const mergedTags = isMulti
-                    ? (aiTags.length ? aiTags : manualTags)
-                    : Array.from(new Set([...manualTags, ...aiTags]));
-                mergedTags.forEach(t => {
-                    if (t && !state.globalProfile.customTags.includes(t) && !newTagsToAdd.includes(t)) {
-                        newTagsToAdd.push(t);
-                    }
-                });
-                return {
-                    text: item.text || cleanRaw,
-                    tags: mergedTags.length ? mergedTags : ['日常点滴'],
-                    event: (eventName || item.event || defaultEvent || '剧情归档').trim()
-                };
-            });
-
-            if (newTagsToAdd.length > 0) {
-                state.globalProfile.customTags.push(...newTagsToAdd);
-                await pushGlobalProfileIfGithub('Add AI generated tags');
+        const draftRes = await summarizeToDraftSlices({
+            rawText: cleanRaw,
+            useAiSummary,
+            tags,
+            eventName,
+            defaultEvent,
+            signal: abortController?.signal || null,
+            onStage: (scene, msg) => {
+                if (!silent) updateLoading(scene || 'SUMMARIZING', useAiSummary ? `[1/3] ${msg}` : msg);
             }
-        } else {
-            itemsToSave = [{
-                text: cleanRaw,
-                tags: manualTags,
-                event: (eventName || defaultEvent || '剧情归档').trim()
-            }];
-        }
+        });
 
-        const today = getTodayDate();
-        const createdSlices = [];
-        for (const item of itemsToSave) {
-            const vec = await getEmbeddingVector(`${item.event} ${item.tags.join(' ')} ${item.text}`);
-            createdSlices.push({
-                id: generateUUID(),
-                text: item.text,
-                date: today,
-                tags: item.tags,
-                event: item.event,
-                vector: vec
-            });
-        }
-
-        const curSlices = [...getCachedSlices(state.currentCompartment), ...createdSlices];
-        await saveCompartment(
-            state.currentCompartment,
-            curSlices,
-            `Archive ${createdSlices.length} slice(s) to ${state.currentCompartment}`
-        );
-
-        const rawChatId = state.currentChatIdentity.rawChatId;
-        if (rawChatId && state.lastScrapedRange && state.lastScrapedRange.chatId === rawChatId) {
-            const prev = state.lastArchivedFloorMap[rawChatId];
-            state.lastArchivedFloorMap[rawChatId] = Number.isFinite(prev)
-                ? Math.max(prev, state.lastScrapedRange.endFloor)
-                : state.lastScrapedRange.endFloor;
-        }
-        state.lastScrapedRange = null;
-        state.turnCounter = 0;
-        saveSettings();
-        renderAllUI();
+        const saved = await saveDraftSlicesToCompartment(draftRes.items, {
+            signal: abortController?.signal || null,
+            newTagsToAdd: draftRes.newTagsToAdd,
+            onStage: (scene, msg) => {
+                if (silent) return;
+                const prefix = useAiSummary
+                    ? (scene === 'EMBEDDING' ? '[2/3] ' : '[3/3] ')
+                    : (scene === 'EMBEDDING' ? '[1/2] ' : '[2/2] ');
+                updateLoading(scene, `${prefix}${msg}`);
+            }
+        });
 
         const modeText = isGithubModeActive() ? '本地 + GitHub 私有库' : '本地 IndexedDB';
-        const countLabel = createdSlices.length > 1
-            ? `已自动拆分为 ${createdSlices.length} 条独立切片`
+        const countLabel = saved.createdSlices.length > 1
+            ? `已自动拆分为 ${saved.createdSlices.length} 条独立切片`
             : '记忆已归档';
-        showToast(countLabel, `已存入 [${state.currentCompartment}] (${modeText} · 共 ${curSlices.length} 条)`);
-        return createdSlices.length === 1 ? createdSlices[0] : createdSlices;
+        const sumPart = useAiSummary ? `总结 ${(draftRes.elapsedMs / 1000).toFixed(1)}s / ` : '';
+        showToast(
+            countLabel,
+            `已存入 [${state.currentCompartment}] (${modeText} · ${sumPart}向量 ${(saved.embedMs / 1000).toFixed(1)}s / 存储 ${(saved.saveMs / 1000).toFixed(1)}s · 共 ${saved.totalCount} 条)`
+        );
+        if (!silent && draftRes.noKeyFallback) {
+            showToast('未配置总结 API Key', '本次未调用总结 AI，已按原文直接截取归档', 'warn');
+        }
+        if (!silent && saved.fallbackCount > 0) {
+            showToast('向量接口异常，已降级为本地特征向量', saved.lastFallbackErr, 'warn', 5200);
+        }
+        return saved.createdSlices.length === 1 ? saved.createdSlices[0] : saved.createdSlices;
     } catch (err) {
-        showToast('归档失败', err.message || String(err), 'err');
+        if (isAbortError(err)) return null;
+        if (!silent) showToast('归档失败', err.message || String(err), 'err');
         return null;
     } finally {
         if (!silent) hideLoading();
+    }
+}
+
+function getDraftBoxPairs() {
+    return [
+        { key: 'top', boxId: 'cqst-top-draft-box', metaId: 'cqst-top-draft-meta', listId: 'cqst-top-draft-list', compact: false },
+        { key: 'mini', boxId: 'cqst-mini-draft-box', metaId: 'cqst-mini-draft-meta', listId: 'cqst-mini-draft-list', compact: true }
+    ];
+}
+
+function syncSiblingDraftField(sourceKey, idx, fieldClass, value) {
+    const otherKey = sourceKey === 'top' ? 'mini' : 'top';
+    const targetInput = document.querySelector(`[data-draft-panel="${otherKey}"][data-draft-idx="${idx}"] .${fieldClass}`);
+    if (targetInput && document.activeElement !== targetInput) {
+        targetInput.value = value;
+    }
+}
+
+function renderPendingDraftsUI() {
+    const drafts = state.pendingDrafts;
+    const pairs = getDraftBoxPairs();
+
+    if (!drafts || !Array.isArray(drafts.items) || drafts.items.length === 0) {
+        pairs.forEach(({ boxId, listId }) => {
+            const box = document.getElementById(boxId);
+            const list = document.getElementById(listId);
+            if (box) box.style.display = 'none';
+            if (list) list.innerHTML = '';
+        });
+        return;
+    }
+
+    const sec = ((drafts.elapsedMs || 0) / 1000).toFixed(1);
+    const metaText = drafts.usedAi
+        ? `📋 已总结 ${drafts.items.length} 条 · ${sec}s（${drafts.providerLabel}）`
+        : `📋 待存入草稿 ${drafts.items.length} 条（${drafts.providerLabel}）`;
+
+    pairs.forEach(({ key, boxId, metaId, listId, compact }) => {
+        const box = document.getElementById(boxId);
+        const meta = document.getElementById(metaId);
+        const list = document.getElementById(listId);
+        if (!box || !list) return;
+
+        box.style.display = 'flex';
+        if (meta) meta.textContent = metaText;
+        list.innerHTML = '';
+
+        drafts.items.forEach((item, idx) => {
+            const card = document.createElement('div');
+            card.className = 'cqst-draft-item';
+            card.setAttribute('data-draft-panel', key);
+            card.setAttribute('data-draft-idx', String(idx));
+
+            const tagsText = Array.isArray(item.tags) ? item.tags.join(', ') : String(item.tags || '');
+            card.innerHTML = `
+                <div class="cqst-draft-item-head">
+                    <span class="cqst-draft-idx">#${idx + 1}</span>
+                    <input type="text" class="cqst-input compact-h cqst-draft-event" value="${escapeHtml(item.event || '')}" placeholder="事件标题">
+                    <input type="text" class="cqst-input compact-h cqst-draft-tags" value="${escapeHtml(tagsText)}" placeholder="标签（逗号分隔）">
+                    <button type="button" class="cqst-btn sm danger cqst-draft-del" title="移除此条草稿">🗑️</button>
+                </div>
+                <textarea class="cqst-textarea cqst-draft-text" rows="${compact ? 3 : 4}" placeholder="记忆摘要内容...">${escapeHtml(item.text || '')}</textarea>
+            `;
+
+            const eventEl = card.querySelector('.cqst-draft-event');
+            const tagsEl = card.querySelector('.cqst-draft-tags');
+            const textEl = card.querySelector('.cqst-draft-text');
+            const delEl = card.querySelector('.cqst-draft-del');
+
+            eventEl.addEventListener('input', () => {
+                if (!state.pendingDrafts?.items?.[idx]) return;
+                state.pendingDrafts.items[idx].event = eventEl.value;
+                syncSiblingDraftField(key, idx, 'cqst-draft-event', eventEl.value);
+            });
+            tagsEl.addEventListener('input', () => {
+                if (!state.pendingDrafts?.items?.[idx]) return;
+                state.pendingDrafts.items[idx].tags = tagsEl.value
+                    .split(/[,，、]+/)
+                    .map(t => t.trim().replace(/^#+/, ''))
+                    .filter(Boolean);
+                syncSiblingDraftField(key, idx, 'cqst-draft-tags', tagsEl.value);
+            });
+            textEl.addEventListener('input', () => {
+                if (!state.pendingDrafts?.items?.[idx]) return;
+                state.pendingDrafts.items[idx].text = textEl.value;
+                syncSiblingDraftField(key, idx, 'cqst-draft-text', textEl.value);
+            });
+            delEl.addEventListener('click', () => {
+                if (!state.pendingDrafts?.items) return;
+                state.pendingDrafts.items.splice(idx, 1);
+                if (state.pendingDrafts.items.length === 0) state.pendingDrafts = null;
+                renderPendingDraftsUI();
+            });
+
+            list.appendChild(card);
+        });
+    });
+}
+
+function discardPendingDrafts() {
+    state.pendingDrafts = null;
+    renderPendingDraftsUI();
+    showToast('已放弃草稿', '可随时重新抓取或调整后再次总结', 'info');
+}
+
+async function runSummarizeOnlyFlow({ rawText, useAiSummary = true, tags = [], source = 'top' }) {
+    const cleanRaw = (rawText || '').trim();
+    if (!cleanRaw) {
+        showToast('内容为空', '请先抓取对话或输入记忆文本', 'warn');
+        return null;
+    }
+
+    const abortController = new AbortController();
+    showLoading(
+        useAiSummary ? 'SUMMARIZING' : 'PREPARING DRAFT',
+        useAiSummary ? `正在调用 AI 总结提炼（${describeSummaryProvider()}）...` : '正在生成待存草稿...',
+        { abortController }
+    );
+
+    try {
+        const res = await summarizeToDraftSlices({
+            rawText: cleanRaw,
+            useAiSummary,
+            tags,
+            defaultEvent: '酒馆归档',
+            signal: abortController.signal,
+            onStage: (scene, msg) => updateLoading(scene || 'SUMMARIZING', msg)
+        });
+
+        state.pendingDrafts = {
+            source,
+            createdAt: Date.now(),
+            elapsedMs: res.elapsedMs,
+            providerLabel: res.providerLabel,
+            usedAi: res.usedAi,
+            noKeyFallback: res.noKeyFallback,
+            items: res.items,
+            newTagsToAdd: res.newTagsToAdd
+        };
+        renderPendingDraftsUI();
+
+        if (res.noKeyFallback) {
+            showToast('未配置总结 API Key', '已按原文生成待存草稿，请填写 Key 或直接点「确认存入」', 'warn', 4800);
+        } else {
+            const timeStr = res.usedAi ? ` · ${(res.elapsedMs / 1000).toFixed(1)}s` : '';
+            showToast(
+                `总结完成（共 ${res.items.length} 条${timeStr}）`,
+                '已生成可编辑草稿，确认无误后点击「💾 确认存入」即可',
+                'ok',
+                4200
+            );
+        }
+        return state.pendingDrafts;
+    } catch (err) {
+        if (isAbortError(err)) return null;
+        showToast('总结阶段失败', err.message || String(err), 'err', 5200);
+        return null;
+    } finally {
+        hideLoading();
+    }
+}
+
+async function commitPendingDraftsFlow() {
+    if (!state.pendingDrafts?.items?.length) {
+        showToast('暂无待存入草稿', '请先点击「📝 先总结预览」生成草稿', 'warn');
+        return null;
+    }
+
+    const abortController = new AbortController();
+    showLoading('EMBEDDING', `[1/2] 正在计算向量（${describeEmbedProvider()}）...`, { abortController });
+
+    try {
+        const saved = await saveDraftSlicesToCompartment(state.pendingDrafts.items, {
+            signal: abortController.signal,
+            newTagsToAdd: state.pendingDrafts.newTagsToAdd || [],
+            onStage: (scene, msg) => {
+                const prefix = scene === 'EMBEDDING' ? '[1/2] ' : '[2/2] ';
+                updateLoading(scene, `${prefix}${msg}`);
+            }
+        });
+
+        state.pendingDrafts = null;
+        const topBox = document.getElementById('cqst-top-archive-preview');
+        const miniBox = document.getElementById('cqst-mini-archive-text');
+        if (topBox) topBox.value = '';
+        if (miniBox) miniBox.value = '';
+        renderPendingDraftsUI();
+
+        const modeText = isGithubModeActive() ? '本地 + GitHub 私有库' : '本地 IndexedDB';
+        showToast(
+            `已手动存入 ${saved.createdSlices.length} 条记忆`,
+            `存入 [${state.currentCompartment}] (${modeText} · 向量 ${(saved.embedMs / 1000).toFixed(1)}s / 写入 ${(saved.saveMs / 1000).toFixed(1)}s · 共 ${saved.totalCount} 条)`
+        );
+        if (saved.fallbackCount > 0) {
+            showToast('向量接口异常，已降级为本地特征向量', saved.lastFallbackErr, 'warn', 5200);
+        }
+        return saved.createdSlices;
+    } catch (err) {
+        if (isAbortError(err)) return null;
+        showToast('存入阶段失败（草稿已保留）', err.message || String(err), 'err', 5200);
+        return null;
+    } finally {
+        hideLoading();
     }
 }
 
@@ -2032,8 +2555,17 @@ function mountBaseContainers() {
     loadingEl.innerHTML = `
         <div class="cqst-loading-box" id="cqst-loading-box" data-text="LOADING SCENE"></div>
         <div class="cqst-loading-sub" id="cqst-loading-sub">正在处理记忆向量...</div>
+        <div class="cqst-loading-meta" id="cqst-loading-meta"></div>
+        <button type="button" class="cqst-btn sm" id="cqst-loading-cancel-btn" style="display:none;">✕ 取消操作</button>
     `;
     overlayHost.appendChild(loadingEl);
+    loadingEl.querySelector('#cqst-loading-cancel-btn')?.addEventListener('click', () => {
+        if (activeLoadingAbort) {
+            try { activeLoadingAbort.abort(); } catch (e) {}
+        }
+        hideLoading();
+        showToast('已取消操作', '当前请求已中止', 'warn');
+    });
 
     // 悬浮触发胶囊
     const pill = document.createElement('div');
@@ -2099,7 +2631,20 @@ function mountBaseContainers() {
                     <input type="checkbox" class="cqst-checkbox" id="cqst-mini-chk-aisum" checked>
                     <span>AI 提炼摘要</span>
                 </label>
-                <button type="button" class="cqst-btn sm primary" id="cqst-mini-archive-btn">⚡ 总结存入</button>
+                <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
+                    <button type="button" class="cqst-btn sm bot" id="cqst-mini-summarize-btn" title="只执行 AI 总结并预览草稿，确认后再手动存入">📝 仅总结</button>
+                    <button type="button" class="cqst-btn sm primary" id="cqst-mini-archive-btn" title="一步完成总结、计算向量并存入">⚡ 一键存</button>
+                </div>
+            </div>
+            <div class="cqst-draft-box" id="cqst-mini-draft-box" style="display:none;">
+                <div class="cqst-draft-header">
+                    <span class="cqst-draft-meta" id="cqst-mini-draft-meta">📋 待存入草稿</span>
+                    <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+                        <button type="button" class="cqst-btn sm" id="cqst-mini-btn-discard-drafts">放弃</button>
+                        <button type="button" class="cqst-btn sm primary" id="cqst-mini-btn-commit-drafts">💾 确认存入</button>
+                    </div>
+                </div>
+                <div class="cqst-draft-list" id="cqst-mini-draft-list"></div>
             </div>
         </div>
 
@@ -2355,7 +2900,20 @@ function buildTopDrawerContentHTML() {
                                 <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-autoarchive">
                                 <span>开启自动存（每 <strong id="cqst-top-lbl-autoturns">10</strong> 轮）</span>
                             </label>
-                            <button type="button" class="cqst-btn primary" id="cqst-top-btn-archive">⚡ 归档记忆</button>
+                            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                                <button type="button" class="cqst-btn bot" id="cqst-top-btn-summarize" title="仅执行第 1 步 AI 总结，生成可编辑草稿后再手动点「确认存入」">📝 先总结预览</button>
+                                <button type="button" class="cqst-btn primary" id="cqst-top-btn-archive" title="一步完成 AI 总结、计算向量并存入记忆库">⚡ 一键归档</button>
+                            </div>
+                        </div>
+                        <div class="cqst-draft-box" id="cqst-top-draft-box" style="display:none;">
+                            <div class="cqst-draft-header">
+                                <span class="cqst-draft-meta" id="cqst-top-draft-meta">📋 待存入草稿</span>
+                                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                                    <button type="button" class="cqst-btn sm" id="cqst-top-btn-discard-drafts">🗑️ 放弃草稿</button>
+                                    <button type="button" class="cqst-btn sm primary" id="cqst-top-btn-commit-drafts">💾 确认存入记忆库</button>
+                                </div>
+                            </div>
+                            <div class="cqst-draft-list" id="cqst-top-draft-list"></div>
                         </div>
                     </div>
 
@@ -2685,6 +3243,7 @@ function mountSillyTavernHooks() {
         populateSettingsUI();
         syncRenameInputsUI();
         renderAllUI();
+        renderPendingDraftsUI();
     }
 
     // 2. 酒馆「扩展」设置页内嵌控制区 (#extensions_settings2 或 #extensions_settings)
@@ -4405,6 +4964,24 @@ function bindBaseUIEvents() {
         showToast('已提取对话', `${rangeInfo}共 ${scraped.length} 字`, 'info');
     });
 
+    document.getElementById('cqst-mini-summarize-btn').addEventListener('click', async () => {
+        let raw = document.getElementById('cqst-mini-archive-text').value.trim();
+        if (!raw) {
+            raw = scrapeMiniChatByUI();
+            document.getElementById('cqst-mini-archive-text').value = raw;
+        }
+        const useAi = document.getElementById('cqst-mini-chk-aisum').checked;
+        await runSummarizeOnlyFlow({
+            rawText: raw,
+            useAiSummary: useAi,
+            tags: Array.from(state.selectedTags),
+            source: 'mini'
+        });
+    });
+
+    document.getElementById('cqst-mini-btn-commit-drafts').addEventListener('click', commitPendingDraftsFlow);
+    document.getElementById('cqst-mini-btn-discard-drafts').addEventListener('click', discardPendingDrafts);
+
     document.getElementById('cqst-mini-archive-btn').addEventListener('click', async () => {
         let raw = document.getElementById('cqst-mini-archive-text').value.trim();
         if (!raw) {
@@ -4673,6 +5250,24 @@ function bindTopDrawerEvents() {
     });
 
     document.getElementById('cqst-top-btn-tags').addEventListener('click', openTagModal);
+
+    document.getElementById('cqst-top-btn-summarize').addEventListener('click', async () => {
+        let raw = document.getElementById('cqst-top-archive-preview').value.trim();
+        if (!raw) {
+            raw = scrapeTopChatByUI();
+            document.getElementById('cqst-top-archive-preview').value = raw;
+        }
+        const useAi = document.getElementById('cqst-top-chk-aisum').checked;
+        await runSummarizeOnlyFlow({
+            rawText: raw,
+            useAiSummary: useAi,
+            tags: Array.from(state.selectedTags),
+            source: 'top'
+        });
+    });
+
+    document.getElementById('cqst-top-btn-commit-drafts').addEventListener('click', commitPendingDraftsFlow);
+    document.getElementById('cqst-top-btn-discard-drafts').addEventListener('click', discardPendingDrafts);
 
     document.getElementById('cqst-top-btn-archive').addEventListener('click', async () => {
         let raw = document.getElementById('cqst-top-archive-preview').value.trim();
