@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.8';
+const PLUGIN_VERSION = '1.0.9';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -368,7 +368,7 @@ function showToast(title, message = '', type = 'ok', duration = 3200) {
     if (!wrap) {
         wrap = document.createElement('div');
         wrap.id = 'cqst-toast-wrap';
-        ['click', 'mousedown', 'pointerdown', 'touchstart'].forEach(evt => {
+        ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend'].forEach(evt => {
             wrap.addEventListener(evt, e => e.stopPropagation());
         });
         document.body.appendChild(wrap);
@@ -379,12 +379,15 @@ function showToast(title, message = '', type = 'ok', duration = 3200) {
         <div class="cqst-toast-title">${escapeHtml(title)}</div>
         ${message ? `<div class="cqst-toast-msg">${escapeHtml(message)}</div>` : ''}
     `;
-    ['mousedown', 'pointerdown', 'touchstart'].forEach(evt => {
+    ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'touchstart', 'touchend'].forEach(evt => {
         toast.addEventListener(evt, e => e.stopPropagation());
     });
     toast.addEventListener('click', (e) => {
         e.stopPropagation();
-        toast.remove();
+        markTopDrawerProtected(450);
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(-6px)';
+        setTimeout(() => toast.remove(), 140);
     });
     wrap.appendChild(toast);
     setTimeout(() => {
@@ -3417,7 +3420,7 @@ function mountSillyTavernHooks() {
             <div id="cqst-top-drawer-toggle" class="cqst-top-toggle" title="✉️ 信笺 | 外置记忆库全景页">
                 <div class="drawer-icon fa-solid fa-envelope-open-text fa-fw closedIcon"></div>
             </div>
-            <div id="cqst-top-drawer-content" class="drawer-content cqst-drawer-closed">
+            <div id="cqst-top-drawer-content" class="drawer-content closedDrawer">
                 ${buildTopDrawerContentHTML()}
             </div>
         `;
@@ -3428,6 +3431,7 @@ function mountSillyTavernHooks() {
             topHolder.appendChild(topDrawer);
         }
         bindTopDrawerEvents();
+        setupTopDrawerProtection();
         populateSettingsUI({ force: true });
         syncRenameInputsUI();
         renderAllUI();
@@ -3532,6 +3536,80 @@ function closeOtherSTTopDrawers() {
     });
 }
 
+let protectTopDrawerUntil = 0;
+let lastPointerDownProtected = false;
+let topDrawerProtectionBound = false;
+
+function markTopDrawerProtected(ms = 400) {
+    protectTopDrawerUntil = Math.max(protectTopDrawerUntil, Date.now() + ms);
+}
+
+function isProtectedDrawerTarget(target) {
+    if (!target || typeof target.closest !== 'function') return false;
+    if (target.closest('#cqst-top-close-btn') || target.closest('#cqst-top-drawer-toggle')) return false;
+    if (target.closest('#cqst-top-drawer-content')) return true;
+    if (target.closest('#cqst-toast-wrap') || target.closest('#toast-container')) return true;
+    if (target.closest('.cqst-modal-overlay') || target.closest('#cqst-loading-backdrop')) return true;
+    if (document.querySelector('.cqst-modal-overlay.open, #cqst-loading-backdrop.open')) return true;
+    return false;
+}
+
+function setupTopDrawerProtection() {
+    if (!topDrawerProtectionBound) {
+        topDrawerProtectionBound = true;
+        ['pointerdown', 'mousedown', 'touchstart'].forEach(evt => {
+            window.addEventListener(evt, (e) => {
+                lastPointerDownProtected = isProtectedDrawerTarget(e.target);
+                if (lastPointerDownProtected) markTopDrawerProtected(450);
+            }, true);
+        });
+        ['pointerup', 'mouseup', 'touchend', 'click'].forEach(evt => {
+            window.addEventListener(evt, (e) => {
+                const isProtected = lastPointerDownProtected || isProtectedDrawerTarget(e.target);
+                if (isProtected) markTopDrawerProtected(450);
+                if (evt === 'click') {
+                    lastPointerDownProtected = false;
+                    if (state.topDrawerOpen && !isProtected) {
+                        const t = e.target;
+                        const inControl = t?.closest?.('#top-settings-holder, #cqst-top-drawer, #cqst-panel, #cqst-floating-pill');
+                        if (!inControl) toggleTopDrawer(false);
+                    }
+                }
+            }, true);
+        });
+    }
+
+    const content = document.getElementById('cqst-top-drawer-content');
+    if (content && !content.dataset.cqstGuarded && typeof MutationObserver !== 'undefined') {
+        content.dataset.cqstGuarded = '1';
+        const observer = new MutationObserver(() => {
+            if (!state.topDrawerOpen) return;
+            if (!content.classList.contains('openDrawer')) {
+                if (Date.now() < protectTopDrawerUntil || document.querySelector('.cqst-modal-overlay.open, #cqst-loading-backdrop.open')) {
+                    content.classList.remove('closedDrawer', 'resizing');
+                    content.classList.add('openDrawer');
+                    content.style.display = '';
+                    content.style.height = '';
+                    content.style.overflow = '';
+                    const icon = document.querySelector('#cqst-top-drawer-toggle .drawer-icon');
+                    if (icon) {
+                        icon.classList.remove('closedIcon');
+                        icon.classList.add('openIcon');
+                    }
+                } else {
+                    state.topDrawerOpen = false;
+                    const icon = document.querySelector('#cqst-top-drawer-toggle .drawer-icon');
+                    if (icon) {
+                        icon.classList.remove('openIcon');
+                        icon.classList.add('closedIcon');
+                    }
+                }
+            }
+        });
+        observer.observe(content, { attributes: true, attributeFilter: ['class', 'style'] });
+    }
+}
+
 function toggleTopDrawer(forceOpen = null) {
     const content = document.getElementById('cqst-top-drawer-content');
     const icon = document.querySelector('#cqst-top-drawer-toggle .drawer-icon');
@@ -3546,8 +3624,8 @@ function toggleTopDrawer(forceOpen = null) {
         content.style.display = '';
         content.style.height = '';
         content.style.overflow = '';
-        content.classList.remove('closedDrawer', 'openDrawer', 'resizing', 'cqst-drawer-closed');
-        content.classList.add('cqst-drawer-open');
+        content.classList.remove('closedDrawer', 'resizing');
+        content.classList.add('openDrawer');
         if (icon) {
             icon.classList.remove('closedIcon');
             icon.classList.add('openIcon');
@@ -3557,8 +3635,8 @@ function toggleTopDrawer(forceOpen = null) {
         renderAllUI();
     } else {
         state.topDrawerOpen = false;
-        content.classList.remove('openDrawer', 'closedDrawer', 'resizing', 'cqst-drawer-open');
-        content.classList.add('cqst-drawer-closed');
+        content.classList.remove('openDrawer', 'resizing');
+        content.classList.add('closedDrawer');
         content.style.display = '';
         content.style.height = '';
         content.style.overflow = '';

@@ -311,12 +311,12 @@ html[data-cqst-theme="night"] {
     height: 100%;
 }
 
-#cqst-top-drawer-content.cqst-drawer-closed,
-#cqst-top-drawer-content:not(.cqst-drawer-open) {
+#cqst-top-drawer-content.closedDrawer,
+#cqst-top-drawer-content:not(.openDrawer) {
     display: none !important;
 }
 
-#cqst-top-drawer-content.cqst-drawer-open {
+#cqst-top-drawer-content.openDrawer {
     display: flex !important;
 }
 
@@ -1640,6 +1640,7 @@ input[type="checkbox"].cqst-checkbox:checked::after {
     }
 
     #cqst-toast-wrap {
+        top: 54px;
         left: 50%;
         right: auto;
         transform: translateX(-50%);
