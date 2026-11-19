@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.10';
+const PLUGIN_VERSION = '1.0.11';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -66,17 +66,17 @@ const PROVIDER_DEFAULTS = {
 
 function cloneDefaultChatProfiles() {
     return {
-        gemini: { key: '', base: PROVIDER_DEFAULTS.gemini.base, model: PROVIDER_DEFAULTS.gemini.chatModel },
-        siliconflow: { key: '', base: PROVIDER_DEFAULTS.siliconflow.base, model: PROVIDER_DEFAULTS.siliconflow.chatModel },
-        openai: { key: '', base: PROVIDER_DEFAULTS.openai.base, model: PROVIDER_DEFAULTS.openai.chatModel }
+        gemini: { key: '', base: PROVIDER_DEFAULTS.gemini.base, model: PROVIDER_DEFAULTS.gemini.chatModel, backupBases: '', backupModels: '' },
+        siliconflow: { key: '', base: PROVIDER_DEFAULTS.siliconflow.base, model: PROVIDER_DEFAULTS.siliconflow.chatModel, backupBases: '', backupModels: '' },
+        openai: { key: '', base: PROVIDER_DEFAULTS.openai.base, model: PROVIDER_DEFAULTS.openai.chatModel, backupBases: '', backupModels: '' }
     };
 }
 
 function cloneDefaultEmbedProfiles() {
     return {
-        siliconflow: { key: '', base: PROVIDER_DEFAULTS.siliconflow.base, model: PROVIDER_DEFAULTS.siliconflow.embedModel },
-        gemini: { key: '', base: PROVIDER_DEFAULTS.gemini.base, model: PROVIDER_DEFAULTS.gemini.embedModel },
-        openai: { key: '', base: PROVIDER_DEFAULTS.openai.base, model: PROVIDER_DEFAULTS.openai.embedModel }
+        siliconflow: { key: '', base: PROVIDER_DEFAULTS.siliconflow.base, model: PROVIDER_DEFAULTS.siliconflow.embedModel, backupBases: '' },
+        gemini: { key: '', base: PROVIDER_DEFAULTS.gemini.base, model: PROVIDER_DEFAULTS.gemini.embedModel, backupBases: '' },
+        openai: { key: '', base: PROVIDER_DEFAULTS.openai.base, model: PROVIDER_DEFAULTS.openai.embedModel, backupBases: '' }
     };
 }
 
@@ -86,11 +86,16 @@ function normalizeProviderProfiles(savedProfiles, isEmbed = false) {
         Object.keys(baseMap).forEach(prov => {
             const entry = savedProfiles[prov];
             if (entry && typeof entry === 'object') {
-                baseMap[prov] = {
+                const next = {
                     key: typeof entry.key === 'string' ? entry.key : '',
                     base: typeof entry.base === 'string' ? entry.base : baseMap[prov].base,
-                    model: typeof entry.model === 'string' && entry.model.trim() ? entry.model.trim() : baseMap[prov].model
+                    model: typeof entry.model === 'string' && entry.model.trim() ? entry.model.trim() : baseMap[prov].model,
+                    backupBases: typeof entry.backupBases === 'string' ? entry.backupBases : ''
                 };
+                if (!isEmbed) {
+                    next.backupModels = typeof entry.backupModels === 'string' ? entry.backupModels : '';
+                }
+                baseMap[prov] = next;
             }
         });
     }
@@ -148,6 +153,7 @@ const DEFAULT_CONFIG = {
     embedModel: 'text-embedding-004',
     chatProfiles: cloneDefaultChatProfiles(),
     embedProfiles: cloneDefaultEmbedProfiles(),
+    nodePollingMode: 'round_robin', // 'round_robin' | 'failover'
     rerankEnabled: false,
     rerankModel: 'BAAI/bge-reranker-v2-m3',
     topK: 5,
@@ -208,6 +214,7 @@ const state = {
     pendingDrafts: null,
     settingsProviderDrafts: null,
     settingsDirty: false,
+    nodeCursors: { chat: 0, embed: 0, rerank: 0 },
     initialized: false
 };
 
@@ -484,13 +491,37 @@ async function fetchWithTimeout(url, options = {}, { timeoutMs = 45000, signal =
     } catch (err) {
         if (userAborted || signal?.aborted) throw createAbortError();
         if (timedOut) {
-            throw new Error(`${label}超时（超过 ${Math.round(timeoutMs / 1000)} 秒），请检查接口地址、Key 或网络代理`);
+            const timeoutErr = new Error(`${label}超时（超过 ${Math.round(timeoutMs / 1000)} 秒），请检查接口地址、Key 或网络代理`);
+            timeoutErr.cqstTimeout = true;
+            throw timeoutErr;
         }
         throw err;
     } finally {
         clearTimeout(timer);
         if (signal) signal.removeEventListener('abort', onExternalAbort);
     }
+}
+
+function sleepWithSignal(ms, signal = null) {
+    if (signal?.aborted) return Promise.reject(createAbortError());
+    const waitMs = Math.max(0, Number(ms) || 0);
+    if (waitMs === 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(createAbortError());
+        };
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            if (signal) signal.removeEventListener('abort', onAbort);
+            resolve();
+        }, waitMs);
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 function raceWithSignalAndTimeout(promise, { timeoutMs = 90000, signal = null, label = '请求' } = {}) {
@@ -737,6 +768,7 @@ function loadSettings() {
             }
             state.config.chatProfiles = normalizeProviderProfiles(saved.config.chatProfiles, false);
             state.config.embedProfiles = normalizeProviderProfiles(saved.config.embedProfiles, true);
+            state.config.nodePollingMode = state.config.nodePollingMode === 'failover' ? 'failover' : 'round_robin';
 
             // 兼容旧版本（<=1.0.6）：首次升级时将单一字段迁移到当前选中的接口档案
             if (!saved.config.chatProfiles && PROVIDER_DEFAULTS[state.config.apiProvider]) {
@@ -744,7 +776,9 @@ function loadSettings() {
                 state.config.chatProfiles[p] = {
                     key: state.config.geminiKey || '',
                     base: state.config.geminiBase || PROVIDER_DEFAULTS[p].base,
-                    model: state.config.chatModel || PROVIDER_DEFAULTS[p].chatModel
+                    model: state.config.chatModel || PROVIDER_DEFAULTS[p].chatModel,
+                    backupBases: '',
+                    backupModels: ''
                 };
             }
             if (!saved.config.embedProfiles && PROVIDER_DEFAULTS[state.config.embedProvider]) {
@@ -753,7 +787,8 @@ function loadSettings() {
                 state.config.embedProfiles[ep] = {
                     key: legacyKey || '',
                     base: state.config.embedBase || PROVIDER_DEFAULTS[ep].base,
-                    model: state.config.embedModel || PROVIDER_DEFAULTS[ep].embedModel
+                    model: state.config.embedModel || PROVIDER_DEFAULTS[ep].embedModel,
+                    backupBases: ''
                 };
             }
             if (state.config.embedProfiles.siliconflow?.model === 'text-embedding-004') {
@@ -1479,28 +1514,114 @@ function computeLocalFallbackVector(text) {
     return compactVector(vec.map(v => v / norm));
 }
 
-function resolveApiEndpoint(provider, rawKey, rawBase) {
-    const key = (rawKey || '').trim();
-    const baseTrim = (rawBase || '').trim().replace(/\/+$/, '');
-    const baseLower = baseTrim.toLowerCase();
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 520, 521, 522, 524]);
 
-    if (provider === 'local' || provider === 'st_current') {
-        return { provider, useOpenAI: false, key, base: baseTrim };
+function isRetryableHttpStatus(status) {
+    return RETRYABLE_HTTP_STATUSES.has(Number(status));
+}
+
+function formatHttpErrorHint(status) {
+    const code = Number(status);
+    if (code === 502 || code === 503 || code === 504) {
+        return '（上游机房过载或渠道暂不可用，建议换模型、稍后重试或配置多机房备用节点轮询）';
+    }
+    if (code === 401 || code === 403) {
+        return '（Key 无效、余额不足或无该模型权限）';
+    }
+    if (code === 404) {
+        return '（接口路径不对或该模型名不存在）';
+    }
+    if (code === 429) {
+        return '（触发限流或额度耗尽）';
+    }
+    return '';
+}
+
+function createHttpError(status, message, { retryable } = {}) {
+    const err = new Error(message || `HTTP ${status}`);
+    err.cqstHttpStatus = Number(status);
+    err.cqstRetryable = typeof retryable === 'boolean' ? retryable : isRetryableHttpStatus(status);
+    return err;
+}
+
+function isRetryableNodeError(err) {
+    if (!err || isAbortError(err)) return false;
+    if (typeof err.cqstRetryable === 'boolean') return err.cqstRetryable;
+    if (Number.isFinite(err.cqstHttpStatus)) return isRetryableHttpStatus(err.cqstHttpStatus);
+    if (err.cqstTimeout) return false;
+    return true;
+}
+
+function describeShortFailure(err) {
+    if (!err) return '未知错误';
+    if (err.cqstTimeout) return '请求超时';
+    if (err.cqstHttpStatus) return `HTTP ${err.cqstHttpStatus}`;
+    const msg = String(err.message || err).replace(/\s+/g, ' ').trim();
+    return msg.length > 48 ? `${msg.slice(0, 48)}...` : msg;
+}
+
+function extractNodeHostLabel(baseUrl) {
+    const raw = String(baseUrl || '').trim();
+    if (!raw) return '默认节点';
+    try {
+        return new URL(raw).host || raw;
+    } catch (e) {
+        return raw.replace(/^https?:\/\//i, '').split('/')[0] || '默认节点';
+    }
+}
+
+function splitApiKeys(rawKey) {
+    return Array.from(new Set(
+        String(rawKey || '')
+            .split(/[,，;；\r\n]+/)
+            .map(s => s.trim())
+            .filter(Boolean)
+    ));
+}
+
+function splitBackupModels(rawModels) {
+    if (Array.isArray(rawModels)) {
+        return Array.from(new Set(rawModels.map(s => String(s || '').trim()).filter(Boolean)));
+    }
+    return Array.from(new Set(
+        String(rawModels || '')
+            .split(/[,，;；\r\n]+/)
+            .map(s => s.trim())
+            .filter(Boolean)
+    ));
+}
+
+function resolveApiEndpoint(provider, rawKey, rawBase) {
+    let effProv = provider || 'gemini';
+    let cleanBase = String(rawBase || '').trim();
+    const prefixMatch = cleanBase.match(/^(openai|gemini|siliconflow)\s*:\s*(https?:\/\/.+)$/i);
+    if (prefixMatch) {
+        effProv = prefixMatch[1].toLowerCase();
+        cleanBase = prefixMatch[2].trim();
     }
 
-    const useOpenAI = provider === 'siliconflow' ||
-        provider === 'openai' ||
-        (provider !== 'gemini' && (baseLower.includes('siliconflow') || baseLower.endsWith('/v1') || key.startsWith('sk-')));
+    const key = (rawKey || '').trim();
+    const baseTrim = cleanBase.replace(/\/+$/, '');
+    const baseLower = baseTrim.toLowerCase();
+
+    if (effProv === 'local' || effProv === 'st_current') {
+        return { provider: effProv, useOpenAI: false, key, base: baseTrim };
+    }
+
+    const useOpenAI = effProv === 'siliconflow' ||
+        effProv === 'openai' ||
+        (effProv !== 'gemini' && (baseLower.includes('siliconflow') || baseLower.endsWith('/v1') || key.startsWith('sk-')));
 
     if (useOpenAI) {
         let openAiBase = baseTrim;
-        if (!openAiBase || openAiBase.includes('generativelanguage.googleapis.com')) {
+        const lowerAi = openAiBase.toLowerCase();
+        if (!openAiBase || lowerAi === 'https://generativelanguage.googleapis.com' || (effProv === 'siliconflow' && lowerAi.includes('generativelanguage.googleapis.com'))) {
             openAiBase = 'https://api.siliconflow.cn/v1';
-        } else if (!openAiBase.endsWith('/v1') && !openAiBase.includes('/v1/')) {
+        } else if (!lowerAi.endsWith('/v1') && !lowerAi.includes('/v1/') && !lowerAi.endsWith('/openai')) {
             openAiBase = `${openAiBase}/v1`;
         }
         return {
-            provider: provider === 'openai' ? 'openai' : 'siliconflow',
+            provider: (effProv === 'openai' && !baseLower.includes('siliconflow.cn')) ? 'openai' : 'siliconflow',
             useOpenAI: true,
             key,
             base: openAiBase
@@ -1509,16 +1630,283 @@ function resolveApiEndpoint(provider, rawKey, rawBase) {
 
     const geminiBase = (!baseTrim || baseLower.includes('siliconflow.cn'))
         ? 'https://generativelanguage.googleapis.com'
-        : baseTrim.replace(/\/v1$/, '');
+        : baseTrim.replace(/\/v1(?:beta)?$/i, '');
     return { provider: 'gemini', useOpenAI: false, key, base: geminiBase };
+}
+
+function buildEndpointCandidates({ provider = 'gemini', rawKey = '', rawBase = '', backupBases = '' } = {}) {
+    if (provider === 'local' || provider === 'st_current') return [];
+    const primaryKeys = splitApiKeys(rawKey);
+    const fallbackKey = primaryKeys[0] || '';
+    const entries = [];
+
+    primaryKeys.forEach((k, idx) => {
+        entries.push({
+            url: rawBase,
+            key: k,
+            modelOverride: '',
+            isPrimary: idx === 0
+        });
+    });
+
+    const lines = String(backupBases || '').split(/\r?\n/);
+    for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) continue;
+        const parts = trimmed.split('|');
+        const lineUrl = (parts[0] || '').trim() || rawBase;
+        const lineKeyRaw = (parts[1] || '').trim();
+        const lineKeys = lineKeyRaw ? splitApiKeys(lineKeyRaw) : (fallbackKey ? [fallbackKey] : []);
+        const lineModel = (parts[2] || '').trim();
+        lineKeys.forEach(k => {
+            entries.push({
+                url: lineUrl,
+                key: k,
+                modelOverride: lineModel,
+                isPrimary: false
+            });
+        });
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    for (const entry of entries) {
+        if (!entry.key) continue;
+        const resolved = resolveApiEndpoint(provider, entry.key, entry.url);
+        if (!resolved.key || !resolved.base) continue;
+        const modelOverride = entry.modelOverride || '';
+        const sig = `${resolved.provider}|${resolved.base}|${resolved.key}|${modelOverride}`;
+        if (seen.has(sig)) continue;
+        seen.add(sig);
+        candidates.push({
+            ...resolved,
+            hostLabel: extractNodeHostLabel(resolved.base),
+            modelOverride,
+            isPrimary: entry.isPrimary
+        });
+    }
+
+    const hostCounts = new Map();
+    candidates.forEach(c => hostCounts.set(c.hostLabel, (hostCounts.get(c.hostLabel) || 0) + 1));
+    const hostSeen = new Map();
+    const total = candidates.length;
+    candidates.forEach((c, idx) => {
+        const countForHost = hostCounts.get(c.hostLabel) || 1;
+        const seq = (hostSeen.get(c.hostLabel) || 0) + 1;
+        hostSeen.set(c.hostLabel, seq);
+        c.label = countForHost > 1 ? `${c.hostLabel} #${seq}` : c.hostLabel;
+        c.nodeIndex = idx + 1;
+        c.nodeTotal = total;
+    });
+
+    return candidates;
+}
+
+function resolveModelForCandidate(candidate, primaryModel = '', isEmbed = false) {
+    if (candidate?.modelOverride) return candidate.modelOverride;
+    const rawPicked = String(primaryModel || '').trim();
+    const prov = candidate?.provider || 'gemini';
+    if (isEmbed) {
+        if (candidate?.useOpenAI) {
+            const defEmb = PROVIDER_DEFAULTS[prov]?.embedModel || 'BAAI/bge-m3';
+            return (!rawPicked || rawPicked.includes('text-embedding-004') || rawPicked.includes('gemini-embedding'))
+                ? defEmb
+                : rawPicked;
+        }
+        return rawPicked || 'text-embedding-004';
+    }
+    if (candidate?.useOpenAI) {
+        const defChat = PROVIDER_DEFAULTS[prov]?.chatModel || 'gpt-4o-mini';
+        if (!rawPicked || (prov === 'siliconflow' && rawPicked.startsWith('gemini-'))) {
+            return defChat;
+        }
+        return rawPicked;
+    }
+    return rawPicked || 'gemini-2.5-flash';
+}
+
+function pickOrderedCandidates(candidates, scopeKey = 'chat', mode = state.config.nodePollingMode) {
+    if (!Array.isArray(candidates) || candidates.length <= 1) {
+        return Array.isArray(candidates) ? [...candidates] : [];
+    }
+    if (mode === 'failover') {
+        return [...candidates];
+    }
+    const len = candidates.length;
+    const start = ((state.nodeCursors?.[scopeKey] || 0) % len + len) % len;
+    if (state.nodeCursors && scopeKey in state.nodeCursors) {
+        state.nodeCursors[scopeKey] = (start + 1) % len;
+    }
+    return [...candidates.slice(start), ...candidates.slice(0, start)];
+}
+
+async function runWithNodePolling({
+    scopeKey = 'chat',
+    candidates = [],
+    primaryModel = '',
+    backupModels = [],
+    mode = 'round_robin',
+    isEmbed = false,
+    signal = null,
+    singleNodeRetries = 2,
+    retryDelaysMs = [1500, 3000],
+    multiNodeRetryDelayMs = 1800,
+    onStatus = null,
+    executeAttempt
+}) {
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+        throw new Error('未配置可用的 API Key 或节点');
+    }
+    const ordered = pickOrderedCandidates(candidates, scopeKey, mode);
+    const modelQueue = Array.from(new Set([primaryModel, ...splitBackupModels(backupModels)].filter(Boolean)));
+    if (modelQueue.length === 0) modelQueue.push('');
+
+    const triedSignatures = new Set();
+    const errors = [];
+    let attemptCount = 0;
+
+    if (ordered.length === 1) {
+        const single = ordered[0];
+        for (let mIdx = 0; mIdx < modelQueue.length; mIdx++) {
+            const actualModel = resolveModelForCandidate(single, modelQueue[mIdx], isEmbed);
+            const sig = `${single.provider}|${single.base}|${single.key}|${actualModel}`;
+            if (triedSignatures.has(sig)) continue;
+            triedSignatures.add(sig);
+
+            const maxAttempts = 1 + Math.max(0, singleNodeRetries);
+            for (let tryNo = 1; tryNo <= maxAttempts; tryNo++) {
+                if (signal?.aborted) throw createAbortError();
+                if (tryNo > 1 || mIdx > 0) {
+                    const msg = (mIdx > 0 && tryNo === 1)
+                        ? `切换备用模型 [${actualModel}] 请求 [${single.label}]...`
+                        : `重试 [${single.label}] (${tryNo}/${maxAttempts}${actualModel ? ` · ${actualModel}` : ''})...`;
+                    onStatus?.(msg);
+                }
+                attemptCount++;
+                try {
+                    const value = await executeAttempt(single, actualModel, {
+                        orderPos: 1,
+                        orderTotal: 1,
+                        attemptCount
+                    });
+                    return { value, node: single, model: actualModel, attemptCount, switchedFromCount: errors.length };
+                } catch (err) {
+                    if (isAbortError(err)) throw err;
+                    errors.push({ label: single.label, model: actualModel, err });
+                    if (tryNo < maxAttempts && isRetryableNodeError(err)) {
+                        const waitMs = retryDelaysMs[tryNo - 1] ?? retryDelaysMs[retryDelaysMs.length - 1] ?? 1500;
+                        onStatus?.(`遇到 ${describeShortFailure(err)}，${(waitMs / 1000).toFixed(1)} 秒后自动重试 (${tryNo + 1}/${maxAttempts})...`);
+                        await sleepWithSignal(waitMs, signal);
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+    } else {
+        for (let mIdx = 0; mIdx < modelQueue.length; mIdx++) {
+            const targetModel = modelQueue[mIdx];
+            const passRetryables = [];
+
+            for (let pos = 0; pos < ordered.length; pos++) {
+                if (signal?.aborted) throw createAbortError();
+                const node = ordered[pos];
+                const actualModel = resolveModelForCandidate(node, targetModel, isEmbed);
+                const sig = `${node.provider}|${node.base}|${node.key}|${actualModel}`;
+                if (triedSignatures.has(sig)) continue;
+                triedSignatures.add(sig);
+
+                onStatus?.(`节点 ${pos + 1}/${ordered.length} [${node.label}] 请求中${actualModel ? `（${actualModel}）` : ''}...`);
+                attemptCount++;
+                try {
+                    const value = await executeAttempt(node, actualModel, {
+                        orderPos: pos + 1,
+                        orderTotal: ordered.length,
+                        attemptCount
+                    });
+                    return { value, node, model: actualModel, attemptCount, switchedFromCount: errors.length };
+                } catch (err) {
+                    if (isAbortError(err)) throw err;
+                    errors.push({ label: node.label, model: actualModel, err });
+                    if (isRetryableNodeError(err)) {
+                        passRetryables.push({ node, pos, actualModel });
+                    }
+                    const nextIdx = ordered.findIndex((cand, idx) => {
+                        if (idx <= pos) return false;
+                        const nextModel = resolveModelForCandidate(cand, targetModel, isEmbed);
+                        const nextSig = `${cand.provider}|${cand.base}|${cand.key}|${nextModel}`;
+                        return !triedSignatures.has(nextSig);
+                    });
+                    if (nextIdx !== -1) {
+                        onStatus?.(`节点 ${pos + 1}/${ordered.length} [${node.label}] ${describeShortFailure(err)}，自动切换节点 ${nextIdx + 1}/${ordered.length} [${ordered[nextIdx].label}]...`);
+                    }
+                }
+            }
+
+            if (mIdx === 0 && passRetryables.length > 0 && multiNodeRetryDelayMs >= 0) {
+                const retryTarget = passRetryables[0];
+                if (signal?.aborted) throw createAbortError();
+                onStatus?.(`全部 ${ordered.length} 个节点首轮均遇阻，${(multiNodeRetryDelayMs / 1000).toFixed(1)} 秒后回试 [${retryTarget.node.label}]...`);
+                await sleepWithSignal(multiNodeRetryDelayMs, signal);
+                attemptCount++;
+                try {
+                    const value = await executeAttempt(retryTarget.node, retryTarget.actualModel, {
+                        orderPos: retryTarget.pos + 1,
+                        orderTotal: ordered.length,
+                        attemptCount
+                    });
+                    return { value, node: retryTarget.node, model: retryTarget.actualModel, attemptCount, switchedFromCount: errors.length };
+                } catch (err) {
+                    if (isAbortError(err)) throw err;
+                    errors.push({ label: retryTarget.node.label, model: retryTarget.actualModel, err });
+                }
+            }
+        }
+    }
+
+    const lastErr = errors[errors.length - 1]?.err;
+    if (errors.length <= 1 && lastErr) throw lastErr;
+    const summary = errors
+        .slice(0, 4)
+        .map(e => `${e.label}(${e.model || 'default'}): ${describeShortFailure(e.err)}`)
+        .join('；');
+    const tailHint = lastErr?.cqstHttpStatus ? formatHttpErrorHint(lastErr.cqstHttpStatus) : '';
+    const aggErr = new Error(`共尝试 ${attemptCount} 次均失败${tailHint}：${summary}${errors.length > 4 ? ` 等共 ${errors.length} 次失败` : ''}`);
+    if (lastErr?.cqstHttpStatus) aggErr.cqstHttpStatus = lastErr.cqstHttpStatus;
+    throw aggErr;
+}
+
+function getChatEndpointCandidates() {
+    const prov = state.config.apiProvider || 'gemini';
+    if (prov === 'st_current') return [];
+    const prof = state.config.chatProfiles?.[prov];
+    const rawKey = (prof ? prof.key : state.config.geminiKey) || '';
+    const rawBase = (prof ? prof.base : state.config.geminiBase) || '';
+    const backupBases = prof?.backupBases || '';
+    return buildEndpointCandidates({ provider: prov, rawKey, rawBase, backupBases });
+}
+
+function getEmbedEndpointCandidates() {
+    const ep = state.config.embedProvider || 'same';
+    if (ep === 'local') return [];
+    if (ep === 'same') {
+        if (state.config.apiProvider === 'st_current') return [];
+        return getChatEndpointCandidates();
+    }
+    const prof = state.config.embedProfiles?.[ep];
+    const rawKey = (prof ? prof.key : state.config.embedKey) || '';
+    const rawBase = (prof ? prof.base : state.config.embedBase) || '';
+    const backupBases = prof?.backupBases || '';
+    return buildEndpointCandidates({ provider: ep, rawKey, rawBase, backupBases });
 }
 
 function getChatApiConfig() {
     const prov = state.config.apiProvider || 'gemini';
     const prof = state.config.chatProfiles?.[prov];
-    const key = (prof ? prof.key : state.config.geminiKey) || '';
+    const rawKey = (prof ? prof.key : state.config.geminiKey) || '';
+    const firstKey = splitApiKeys(rawKey)[0] || '';
     const base = (prof ? prof.base : state.config.geminiBase) || '';
-    return resolveApiEndpoint(prov, key, base);
+    return resolveApiEndpoint(prov, firstKey, base);
 }
 
 function getEmbedApiConfig() {
@@ -1531,40 +1919,80 @@ function getEmbedApiConfig() {
         return getChatApiConfig();
     }
     const prof = state.config.embedProfiles?.[ep];
-    const key = (prof ? prof.key : state.config.embedKey) || '';
+    const rawKey = (prof ? prof.key : state.config.embedKey) || '';
+    const firstKey = splitApiKeys(rawKey)[0] || '';
     const base = (prof ? prof.base : state.config.embedBase) || '';
-    return resolveApiEndpoint(ep, key, base);
+    return resolveApiEndpoint(ep, firstKey, base);
 }
 
 function describeSummaryProvider() {
     const provider = state.config.apiProvider || 'gemini';
     if (provider === 'st_current') return '酒馆当前主API';
-    const cfg = getChatApiConfig();
+    const candidates = getChatEndpointCandidates();
+    const cfg = candidates[0] || getChatApiConfig();
     const rawModel = (state.config.chatModel || '').trim();
-    if (cfg.useOpenAI) {
-        const model = (!rawModel || rawModel.startsWith('gemini-'))
-            ? (cfg.provider === 'openai' ? 'gpt-4o-mini' : 'Qwen/Qwen2.5-7B-Instruct')
-            : rawModel;
-        const name = cfg.provider === 'openai' ? 'OpenAI反代' : '硅基流动';
-        return `${name} · ${model}`;
-    }
-    const model = rawModel || 'gemini-2.5-flash';
-    return `Gemini · ${model}`;
+    const model = resolveModelForCandidate(cfg, rawModel, false);
+    const name = cfg.useOpenAI ? (cfg.provider === 'openai' ? 'OpenAI反代' : '硅基流动') : 'Gemini';
+    const nodeSuffix = candidates.length > 1 ? ` · ${candidates.length}节点` : '';
+    return `${name} · ${model}${nodeSuffix}`;
 }
 
 function describeEmbedProvider() {
-    const cfg = getEmbedApiConfig();
-    if (cfg.provider === 'local' || !cfg.key) return '本地特征向量(离线)';
-    const rawModel = (state.config.embedModel || '').trim();
-    if (cfg.useOpenAI) {
-        const embedModel = (!rawModel || rawModel.includes('text-embedding-004') || rawModel.includes('gemini-embedding'))
-            ? (cfg.provider === 'openai' ? 'text-embedding-3-small' : 'BAAI/bge-m3')
-            : rawModel;
-        const name = cfg.provider === 'openai' ? 'OpenAI反代' : '硅基流动';
-        return `${name} · ${embedModel}`;
+    const ep = state.config.embedProvider || 'same';
+    if (ep === 'local' || (ep === 'same' && state.config.apiProvider === 'st_current')) {
+        return '本地特征向量(离线)';
     }
-    const model = rawModel || 'text-embedding-004';
-    return `Gemini · ${model}`;
+    const candidates = getEmbedEndpointCandidates();
+    if (!candidates.length) return '本地特征向量(离线)';
+    const cfg = candidates[0];
+    const rawModel = (state.config.embedModel || '').trim();
+    const embedModel = resolveModelForCandidate(cfg, rawModel, true);
+    const name = cfg.useOpenAI ? (cfg.provider === 'openai' ? 'OpenAI反代' : '硅基流动') : 'Gemini';
+    const nodeSuffix = candidates.length > 1 ? ` · ${candidates.length}节点` : '';
+    return `${name} · ${embedModel}${nodeSuffix}`;
+}
+
+async function callEmbedSingleNode(node, model, { text, timeoutMs = 25000, signal = null, label = '向量接口' } = {}) {
+    if (node.useOpenAI) {
+        const res = await fetchWithTimeout(`${node.base}/embeddings`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${node.key}`
+            },
+            body: JSON.stringify({ model, input: text, encoding_format: 'float' })
+        }, { timeoutMs, signal, label });
+        if (!res.ok) {
+            const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+            throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+        }
+        const data = await res.json();
+        const emb = data.data?.[0]?.embedding;
+        if (!Array.isArray(emb) || emb.length === 0) {
+            const emptyErr = new Error('向量接口返回空数据');
+            emptyErr.cqstRetryable = false;
+            throw emptyErr;
+        }
+        return compactVector(emb);
+    }
+
+    const res = await fetchWithTimeout(`${node.base}/v1beta/models/${model}:embedContent?key=${encodeURIComponent(node.key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] } })
+    }, { timeoutMs, signal, label });
+    if (!res.ok) {
+        const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+        throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+    }
+    const data = await res.json();
+    const values = data.embedding?.values;
+    if (!Array.isArray(values) || values.length === 0) {
+        const emptyErr = new Error('Gemini 向量接口返回空数据');
+        emptyErr.cqstRetryable = false;
+        throw emptyErr;
+    }
+    return compactVector(values);
 }
 
 async function getEmbeddingVector(text, strictOrOpts = false) {
@@ -1574,67 +2002,43 @@ async function getEmbeddingVector(text, strictOrOpts = false) {
     const { strict = false, signal = null, onProgress = null, onFallback = null } = opts;
 
     const cfg = getEmbedApiConfig();
-    if (cfg.provider === 'local' || !cfg.key) {
+    const candidates = getEmbedEndpointCandidates();
+    if (cfg.provider === 'local' || candidates.length === 0) {
         if (strict && cfg.provider !== 'local') throw new Error('未配置向量 API Key');
         return computeLocalFallbackVector(text);
     }
 
-    if (cfg.useOpenAI) {
-        const rawModel = (state.config.embedModel || '').trim();
-        const embedModel = (!rawModel || rawModel.includes('text-embedding-004') || rawModel.includes('gemini-embedding'))
-            ? (cfg.provider === 'openai' ? 'text-embedding-3-small' : 'BAAI/bge-m3')
-            : rawModel;
-        let lastErr = '向量接口返回空数据';
-        try {
-            const res = await fetchWithTimeout(`${cfg.base}/embeddings`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${cfg.key}`
-                },
-                body: JSON.stringify({ model: embedModel, input: text, encoding_format: 'float' })
-            }, { timeoutMs: 25000, signal, label: '向量接口' });
-            if (res.ok) {
-                const data = await res.json();
-                const emb = data.data?.[0]?.embedding;
-                if (Array.isArray(emb)) return compactVector(emb);
-            } else {
-                lastErr = `HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 120)}`;
-            }
-        } catch (e) {
-            if (isAbortError(e)) throw e;
-            lastErr = e.message || String(e);
-        }
+    const primaryModel = (state.config.embedModel || '').trim();
+    const hasGemini = candidates.some(c => !c.useOpenAI);
+    const backupModels = hasGemini ? ['gemini-embedding-001'] : [];
+    const timeoutMs = candidates.length > 1 ? 18000 : 25000;
+
+    try {
+        const res = await runWithNodePolling({
+            scopeKey: 'embed',
+            candidates,
+            primaryModel,
+            backupModels,
+            mode: state.config.nodePollingMode || 'round_robin',
+            isEmbed: true,
+            signal,
+            singleNodeRetries: 1,
+            onStatus: onProgress,
+            executeAttempt: (node, model) => callEmbedSingleNode(node, model, {
+                text,
+                timeoutMs,
+                signal,
+                label: '向量接口'
+            })
+        });
+        return res.value;
+    } catch (e) {
+        if (isAbortError(e)) throw e;
+        const lastErr = e.message || String(e);
         if (strict) throw new Error(lastErr);
         onFallback?.(lastErr);
         return computeLocalFallbackVector(text);
     }
-
-    const models = Array.from(new Set([state.config.embedModel || 'text-embedding-004', 'gemini-embedding-001']));
-    let lastGeminiErr = 'Gemini Embedding 调用失败';
-    for (let i = 0; i < models.length; i++) {
-        const m = models[i];
-        if (i > 0) onProgress?.(`尝试备用向量模型 ${m}...`);
-        try {
-            const res = await fetchWithTimeout(`${cfg.base}/v1beta/models/${m}:embedContent?key=${encodeURIComponent(cfg.key)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: `models/${m}`, content: { parts: [{ text }] } })
-            }, { timeoutMs: 25000, signal, label: '向量接口' });
-            if (res.ok) {
-                const data = await res.json();
-                if (Array.isArray(data.embedding?.values)) return compactVector(data.embedding.values);
-            } else {
-                lastGeminiErr = `HTTP ${res.status}: ${(await res.text().catch(() => '')).slice(0, 120)}`;
-            }
-        } catch (e) {
-            if (isAbortError(e)) throw e;
-            lastGeminiErr = e.message || String(e);
-        }
-    }
-    if (strict) throw new Error(lastGeminiErr);
-    onFallback?.(lastGeminiErr);
-    return computeLocalFallbackVector(text);
 }
 
 function cosineSimilarity(a, b) {
@@ -1660,48 +2064,54 @@ function lexicalOverlapScore(query, slice) {
 }
 
 async function rerankCandidates(queryText, coarseItems, topK, threshold) {
-    const cfg = getEmbedApiConfig();
-    if (!cfg.key || !cfg.useOpenAI || coarseItems.length <= 1) return null;
+    const openAiNodes = getEmbedEndpointCandidates().filter(n => n.useOpenAI && n.key);
+    if (!openAiNodes.length || coarseItems.length <= 1) return null;
+    const orderedNodes = pickOrderedCandidates(openAiNodes, 'rerank', state.config.nodePollingMode || 'round_robin');
     const model = (state.config.rerankModel || '').trim() || 'BAAI/bge-reranker-v2-m3';
-    try {
-        const docs = coarseItems.map(c => {
-            const tagsStr = (c.slice.tags || []).map(t => `#${t}`).join(' ');
-            return `${c.slice.date ? '[' + c.slice.date + '] ' : ''}${tagsStr ? tagsStr + ' ' : ''}${c.slice.text || ''}`;
-        });
-        const res = await fetchWithTimeout(`${cfg.base}/rerank`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${cfg.key}`
-            },
-            body: JSON.stringify({
-                model,
-                query: queryText,
-                documents: docs,
-                top_n: docs.length,
-                return_documents: false
-            })
-        }, { timeoutMs: 15000, label: '重排接口' });
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (!Array.isArray(data.results) || !data.results.length) return null;
-        const finalItems = data.results
-            .map(r => {
-                const orig = coarseItems[r.index];
-                if (!orig) return null;
-                const rScore = Number(r.relevance_score || 0);
-                const fused = (rScore * 0.7) + (orig.score * 0.3) + (orig.exactBonus > 0 ? 0.25 : 0);
-                const finalScore = Math.min(0.99, Math.max(orig.score, fused));
-                return { slice: orig.slice, score: finalScore };
-            })
-            .filter(item => item && (threshold <= 0 || item.score >= threshold))
-            .sort((a, b) => b.score - a.score)
-            .slice(0, topK);
+    const docs = coarseItems.map(c => {
+        const tagsStr = (c.slice.tags || []).map(t => `#${t}`).join(' ');
+        return `${c.slice.date ? '[' + c.slice.date + '] ' : ''}${tagsStr ? tagsStr + ' ' : ''}${c.slice.text || ''}`;
+    });
+    const timeoutMs = orderedNodes.length > 1 ? 10000 : 15000;
 
-        return finalItems.length > 0 ? finalItems : null;
-    } catch (e) {
-        return null;
+    for (const node of orderedNodes) {
+        try {
+            const res = await fetchWithTimeout(`${node.base}/rerank`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${node.key}`
+                },
+                body: JSON.stringify({
+                    model,
+                    query: queryText,
+                    documents: docs,
+                    top_n: docs.length,
+                    return_documents: false
+                })
+            }, { timeoutMs, label: '重排接口' });
+            if (!res.ok) continue;
+            const data = await res.json();
+            if (!Array.isArray(data.results) || !data.results.length) continue;
+            const finalItems = data.results
+                .map(r => {
+                    const orig = coarseItems[r.index];
+                    if (!orig) return null;
+                    const rScore = Number(r.relevance_score || 0);
+                    const fused = (rScore * 0.7) + (orig.score * 0.3) + (orig.exactBonus > 0 ? 0.25 : 0);
+                    const finalScore = Math.min(0.99, Math.max(orig.score, fused));
+                    return { slice: orig.slice, score: finalScore };
+                })
+                .filter(item => item && (threshold <= 0 || item.score >= threshold))
+                .sort((a, b) => b.score - a.score)
+                .slice(0, topK);
+
+            if (finalItems.length > 0) return finalItems;
+        } catch (e) {
+            continue;
+        }
     }
+    return null;
 }
 
 async function retrieveTopKMemories(queryText, filterTag = '', topK = state.config.topK, minScore = state.config.minScore) {
@@ -1724,8 +2134,8 @@ async function retrieveTopKMemories(queryText, filterTag = '', topK = state.conf
         return { slice, score, exactBonus };
     }).sort((a, b) => b.score - a.score);
 
-    const embedCfg = getEmbedApiConfig();
-    if (state.config.rerankEnabled && embedCfg.useOpenAI && scoredAll.length > 1) {
+    const hasOpenAiEmbed = getEmbedEndpointCandidates().some(n => n.useOpenAI && n.key);
+    if (state.config.rerankEnabled && hasOpenAiEmbed && scoredAll.length > 1) {
         const coarsePool = scoredAll.slice(0, Math.max(topK * 3, 15));
         const reranked = await rerankCandidates(queryText, coarsePool, topK, threshold);
         if (reranked !== null) return reranked;
@@ -1813,7 +2223,77 @@ function splitSummaryChunks(rawText, maxChunkChars = 7500) {
     return chunks.length ? chunks : [text];
 }
 
-async function invokeSummaryApi(sys, chunkText, { signal = null } = {}) {
+async function callChatSingleNode(node, model, {
+    sys = '',
+    userText = '',
+    maxTokens = null,
+    temperature = null,
+    timeoutMs = 90000,
+    signal = null,
+    label = '总结接口',
+    includeReasoning = false,
+    requireNonEmpty = false
+} = {}) {
+    let replyText = '';
+    if (node.useOpenAI) {
+        const messages = sys
+            ? [{ role: 'system', content: sys }, { role: 'user', content: userText }]
+            : [{ role: 'user', content: userText }];
+        const payload = { model, messages };
+        if (Number.isFinite(maxTokens)) payload.max_tokens = maxTokens;
+        if (Number.isFinite(temperature)) payload.temperature = temperature;
+
+        const res = await fetchWithTimeout(`${node.base}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${node.key}`
+            },
+            body: JSON.stringify(payload)
+        }, { timeoutMs, signal, label });
+        if (!res.ok) {
+            const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+            throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+        }
+        const data = await res.json();
+        const msg = data.choices?.[0]?.message;
+        replyText = String(includeReasoning ? (msg?.content || msg?.reasoning_content || '') : (msg?.content || ''));
+    } else {
+        const payload = {
+            contents: [{ role: 'user', parts: [{ text: userText }] }],
+            safetySettings: [
+                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' }
+            ]
+        };
+        if (sys) {
+            payload.systemInstruction = { parts: [{ text: sys }] };
+        }
+        const res = await fetchWithTimeout(`${node.base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(node.key)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }, { timeoutMs, signal, label: label === '总结接口' ? 'Gemini 总结接口' : label });
+        if (!res.ok) {
+            const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+            throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+        }
+        const data = await res.json();
+        replyText = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+    }
+
+    if (requireNonEmpty && !replyText.replace(/\s+/g, ' ').trim()) {
+        const emptyErr = new Error('接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文');
+        emptyErr.cqstRetryable = false;
+        throw emptyErr;
+    }
+    return replyText;
+}
+
+async function invokeSummaryApi(sys, chunkText, { signal = null, onStatus = null } = {}) {
     const provider = state.config.apiProvider || 'gemini';
 
     if (provider === 'st_current') {
@@ -1828,59 +2308,43 @@ async function invokeSummaryApi(sys, chunkText, { signal = null } = {}) {
             ? ctx.generateQuietPrompt({ quietPrompt: combined, skipWIAN: true })
             : ctx.generateQuietPrompt(combined, false, true);
         const reply = await raceWithSignalAndTimeout(quietCall, { timeoutMs: 90000, signal, label: '酒馆主 API 总结' });
-        return String(reply || '');
+        return { text: String(reply || ''), node: null, model: 'st_current', switchedFromCount: 0, nodeTotal: 1 };
     }
 
-    const cfg = getChatApiConfig();
-    if (cfg.useOpenAI) {
-        const rawModel = (state.config.chatModel || '').trim();
-        const model = (!rawModel || rawModel.startsWith('gemini-'))
-            ? (cfg.provider === 'openai' ? 'gpt-4o-mini' : 'Qwen/Qwen2.5-7B-Instruct')
-            : rawModel;
-        const res = await fetchWithTimeout(`${cfg.base}/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${cfg.key}`
-            },
-            body: JSON.stringify({
-                model,
-                messages: [
-                    { role: 'system', content: sys },
-                    { role: 'user', content: chunkText }
-                ]
-            })
-        }, { timeoutMs: 90000, signal, label: '总结接口' });
-        if (!res.ok) {
-            const errBody = (await res.text().catch(() => '')).slice(0, 140);
-            throw new Error(`总结接口调用失败 (${res.status})${errBody ? `: ${errBody}` : ''}`);
-        }
-        const data = await res.json();
-        return data.choices?.[0]?.message?.content || '';
-    }
+    const candidates = getChatEndpointCandidates();
+    const prof = state.config.chatProfiles?.[provider];
+    const primaryModel = (state.config.chatModel || '').trim();
+    const backupModels = splitBackupModels(prof?.backupModels || '');
+    const timeoutMs = candidates.length > 1 ? 45000 : 90000;
 
-    const model = (state.config.chatModel || '').trim() || 'gemini-2.5-flash';
-    const res = await fetchWithTimeout(`${cfg.base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(cfg.key)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            systemInstruction: { parts: [{ text: sys }] },
-            contents: [{ role: 'user', parts: [{ text: chunkText }] }],
-            safetySettings: [
-                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' }
-            ]
+    const res = await runWithNodePolling({
+        scopeKey: 'chat',
+        candidates,
+        primaryModel,
+        backupModels,
+        mode: state.config.nodePollingMode || 'round_robin',
+        isEmbed: false,
+        signal,
+        singleNodeRetries: 2,
+        onStatus,
+        executeAttempt: (node, model) => callChatSingleNode(node, model, {
+            sys,
+            userText: chunkText,
+            timeoutMs,
+            signal,
+            label: '总结接口',
+            includeReasoning: false,
+            requireNonEmpty: false
         })
-    }, { timeoutMs: 90000, signal, label: 'Gemini 总结接口' });
-    if (!res.ok) {
-        const errBody = (await res.text().catch(() => '')).slice(0, 140);
-        throw new Error(`Gemini 总结失败 (${res.status})${errBody ? `: ${errBody}` : ''}`);
-    }
-    const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    });
+
+    return {
+        text: String(res.value || ''),
+        node: res.node,
+        model: res.model,
+        switchedFromCount: res.switchedFromCount,
+        nodeTotal: candidates.length
+    };
 }
 
 function buildSummarySystemPrompt() {
@@ -1905,7 +2369,7 @@ async function callSummaryModel(rawText, { signal = null, onProgress = null } = 
     const fallbackTags = Array.from(state.selectedTags);
     const provider = state.config.apiProvider || 'gemini';
     const providerLabel = describeSummaryProvider();
-    if (provider !== 'st_current' && !getChatApiConfig().key) {
+    if (provider !== 'st_current' && getChatEndpointCandidates().length === 0) {
         const single = {
             text: String(rawText || '').slice(0, 220),
             tags: fallbackTags.length ? fallbackTags : ['日常点滴'],
@@ -1918,9 +2382,18 @@ async function callSummaryModel(rawText, { signal = null, onProgress = null } = 
 
     const chunks = splitSummaryChunks(rawText, 7500);
     const allSlices = [];
+    let finalProviderLabel = providerLabel;
     for (let i = 0; i < chunks.length; i++) {
         onProgress?.(i + 1, chunks.length, providerLabel);
-        const reply = await invokeSummaryApi(sys, chunks[i], { signal });
+        const res = await invokeSummaryApi(sys, chunks[i], {
+            signal,
+            onStatus: (msg) => onProgress?.(i + 1, chunks.length, providerLabel, msg)
+        });
+        const reply = typeof res === 'string' ? res : (res?.text || '');
+        if (res && typeof res === 'object' && res.node) {
+            const pName = res.node.useOpenAI ? (res.node.provider === 'openai' ? 'OpenAI反代' : '硅基流动') : 'Gemini';
+            finalProviderLabel = `${pName} · ${res.model}${res.nodeTotal > 1 ? ` · ${res.node.label}` : ''}`;
+        }
         const parsed = parseAiSlicesResponse(reply, chunks[i], fallbackTags);
         allSlices.push(...parsed);
     }
@@ -1937,7 +2410,7 @@ async function callSummaryModel(rawText, { signal = null, onProgress = null } = 
         event: first.event,
         usedAi: true,
         noKeyFallback: false,
-        providerLabel
+        providerLabel: finalProviderLabel
     };
 }
 
@@ -2253,10 +2726,14 @@ async function summarizeToDraftSlices({ rawText, useAiSummary = true, tags = [],
 
     const sum = await callSummaryModel(cleanRaw, {
         signal,
-        onProgress: (idx, total, label) => {
-            onStage?.('SUMMARIZING', total > 1
-                ? `正在 AI 总结提炼第 ${idx}/${total} 段（${label}）...`
-                : `正在调用 AI 总结提炼（${label}）...`);
+        onProgress: (idx, total, label, detailMsg = '') => {
+            if (detailMsg) {
+                onStage?.('SUMMARIZING', total > 1 ? `第 ${idx}/${total} 段：${detailMsg}` : detailMsg);
+            } else {
+                onStage?.('SUMMARIZING', total > 1
+                    ? `正在 AI 总结提炼第 ${idx}/${total} 段（${label}）...`
+                    : `正在调用 AI 总结提炼（${label}）...`);
+            }
         }
     });
 
@@ -3262,7 +3739,7 @@ function buildTopDrawerContentHTML() {
                             <div class="cqst-form-group">
                                 <label class="cqst-form-label">
                                     <span>当前接口 API Key</span>
-                                    <span style="font-size:11px;font-weight:400;color:var(--cqst-text-faded);">各接口 Key 独立保存，切换不串用</span>
+                                    <span style="font-size:11px;font-weight:400;color:var(--cqst-text-faded);">各接口独立保存 · 可逗号分隔多个 Key</span>
                                 </label>
                                 <div class="cqst-row" style="gap:5px;">
                                     <input type="password" id="cqst-cfg-chat-key" class="cqst-input" placeholder="Google Gemini API Key (AIzaSy...)">
@@ -3280,6 +3757,30 @@ function buildTopDrawerContentHTML() {
                                     <input type="text" id="cqst-cfg-chat-model-custom" class="cqst-input" placeholder="可选：手填其他模型名（留空即使用上方下拉模型）">
                                 </div>
                             </div>
+                            <details class="cqst-node-pool-box" id="cqst-cfg-chat-pool-details">
+                                <summary class="cqst-node-pool-summary">
+                                    <span class="cqst-node-pool-summary-title">🌐 多机房 / 备用节点轮询（抗 503 / 超时）</span>
+                                    <span class="cqst-status-pill" id="cqst-cfg-chat-pool-badge">单节点 · 503自动重试</span>
+                                </summary>
+                                <div class="cqst-node-pool-body">
+                                    <div class="cqst-form-group">
+                                        <label class="cqst-form-label">轮询策略</label>
+                                        <select id="cqst-cfg-polling-mode" class="cqst-select">
+                                            <option value="round_robin">⚖️ 多节点轮询均衡 + 遇 503/429/超时自动切换（推荐）</option>
+                                            <option value="failover">🛡️ 主节点优先 + 故障顺延切备用节点</option>
+                                        </select>
+                                    </div>
+                                    <div class="cqst-form-group">
+                                        <label class="cqst-form-label">备用节点 / 机房池（每行一个）</label>
+                                        <textarea id="cqst-cfg-chat-backup-bases" class="cqst-textarea cqst-node-pool-textarea" rows="3" placeholder="每行一条，支持以下格式：&#10;https://proxy2.example.com&#10;https://proxy3.example.com|专属Key&#10;openai:https://oneapi.example.com/v1|sk-xxx|gpt-4o-mini"></textarea>
+                                        <span class="cqst-form-hint">可只写备用网址（自动复用主 Key），或用 <code>|</code> 附带专属 Key / 模型；写 <code>|备用Key</code> 可同机房轮换 Key；以 <code>openai:</code> 开头可混用兼容反代。即使只填 1 个节点，遇 503/429 也会自动退避重试。</span>
+                                    </div>
+                                    <div class="cqst-form-group">
+                                        <label class="cqst-form-label">备用降级模型（可选，逗号分隔）</label>
+                                        <input type="text" id="cqst-cfg-chat-backup-models" class="cqst-input" placeholder="如：gemini-2.5-flash-lite, gemini-2.0-flash（所有节点主模型均过载时顺延切换）">
+                                    </div>
+                                </div>
+                            </details>
                         </div>
                         <div class="cqst-test-result" id="cqst-cfg-chat-test-result" style="display:none;"></div>
 
@@ -3302,18 +3803,32 @@ function buildTopDrawerContentHTML() {
                             </select>
                             <span class="cqst-form-hint" id="cqst-cfg-embed-hint"></span>
                         </div>
-                        <div id="cqst-cfg-embed-auth-box" class="cqst-form-grid-2" style="display:none;">
-                            <div class="cqst-form-group">
-                                <label class="cqst-form-label">向量专用 API Key</label>
-                                <div class="cqst-row" style="gap:5px;">
-                                    <input type="password" id="cqst-cfg-embed-key" class="cqst-input" placeholder="硅基流动 API Key (sk-...)">
-                                    <button type="button" class="cqst-btn sm icon-only cqst-toggle-secret" data-secret-target="cqst-cfg-embed-key" title="显示 / 隐藏向量 Key">👁️</button>
+                        <div id="cqst-cfg-embed-auth-box" style="display:none;flex-direction:column;gap:8px;">
+                            <div class="cqst-form-grid-2">
+                                <div class="cqst-form-group">
+                                    <label class="cqst-form-label">向量专用 API Key</label>
+                                    <div class="cqst-row" style="gap:5px;">
+                                        <input type="password" id="cqst-cfg-embed-key" class="cqst-input" placeholder="硅基流动 API Key (sk-...)">
+                                        <button type="button" class="cqst-btn sm icon-only cqst-toggle-secret" data-secret-target="cqst-cfg-embed-key" title="显示 / 隐藏向量 Key">👁️</button>
+                                    </div>
+                                </div>
+                                <div class="cqst-form-group">
+                                    <label class="cqst-form-label">向量 Base URL</label>
+                                    <input type="text" id="cqst-cfg-embed-base" class="cqst-input" placeholder="https://api.siliconflow.cn/v1">
                                 </div>
                             </div>
-                            <div class="cqst-form-group">
-                                <label class="cqst-form-label">向量 Base URL</label>
-                                <input type="text" id="cqst-cfg-embed-base" class="cqst-input" placeholder="https://api.siliconflow.cn/v1">
-                            </div>
+                            <details class="cqst-node-pool-box" id="cqst-cfg-embed-pool-details">
+                                <summary class="cqst-node-pool-summary">
+                                    <span class="cqst-node-pool-summary-title">🌐 向量备用节点轮询</span>
+                                    <span class="cqst-status-pill" id="cqst-cfg-embed-pool-badge">单节点 · 503自动重试</span>
+                                </summary>
+                                <div class="cqst-node-pool-body">
+                                    <div class="cqst-form-group">
+                                        <label class="cqst-form-label">向量备用节点（每行一个，支持 网址|专属Key）</label>
+                                        <textarea id="cqst-cfg-embed-backup-bases" class="cqst-textarea cqst-node-pool-textarea" rows="2" placeholder="https://backup-embed.example.com/v1&#10;https://backup2.example.com/v1|sk-xxx"></textarea>
+                                    </div>
+                                </div>
+                            </details>
                         </div>
                         <div class="cqst-form-grid-2">
                             <div class="cqst-form-group">
@@ -5053,6 +5568,37 @@ function resetSecretFieldVisibility(inputId) {
     if (btn) btn.textContent = '👁️';
 }
 
+function updateNodePoolBadge(kind = 'chat') {
+    const isEmbed = kind === 'embed';
+    const badge = document.getElementById(isEmbed ? 'cqst-cfg-embed-pool-badge' : 'cqst-cfg-chat-pool-badge');
+    if (!badge) return;
+
+    const provider = document.getElementById(isEmbed ? 'cqst-cfg-embed-provider' : 'cqst-cfg-api-provider')?.value || 'gemini';
+    if (provider === 'st_current' || provider === 'same' || provider === 'local') {
+        badge.textContent = '单节点 · 503自动重试';
+        badge.className = 'cqst-status-pill';
+        return;
+    }
+
+    const rawKey = document.getElementById(isEmbed ? 'cqst-cfg-embed-key' : 'cqst-cfg-chat-key')?.value.trim() || '';
+    const rawBase = document.getElementById(isEmbed ? 'cqst-cfg-embed-base' : 'cqst-cfg-chat-base')?.value.trim() || '';
+    const backupBases = document.getElementById(isEmbed ? 'cqst-cfg-embed-backup-bases' : 'cqst-cfg-chat-backup-bases')?.value || '';
+    const candidates = buildEndpointCandidates({ provider, rawKey, rawBase, backupBases });
+    const backupModels = isEmbed
+        ? []
+        : splitBackupModels(document.getElementById('cqst-cfg-chat-backup-models')?.value || '');
+
+    const parts = [];
+    if (candidates.length > 1) parts.push(`${candidates.length} 节点轮询`);
+    else parts.push('单节点 · 503自动重试');
+    if (backupModels.length > 0) parts.push(`${backupModels.length} 备用模型`);
+
+    badge.textContent = parts.join(' + ');
+    badge.className = candidates.length > 1 || backupModels.length > 0
+        ? 'cqst-status-pill ok'
+        : 'cqst-status-pill';
+}
+
 function stashCurrentProviderInputs(kind, prov) {
     if (!prov || !PROVIDER_DEFAULTS[prov]) return;
     const drafts = ensureSettingsProviderDrafts();
@@ -5061,6 +5607,7 @@ function stashCurrentProviderInputs(kind, prov) {
     const baseId = isEmbed ? 'cqst-cfg-embed-base' : 'cqst-cfg-chat-base';
     const modelId = isEmbed ? 'cqst-cfg-embed-model' : 'cqst-cfg-chat-model';
     const customId = isEmbed ? 'cqst-cfg-embed-model-custom' : 'cqst-cfg-chat-model-custom';
+    const backupBasesId = isEmbed ? 'cqst-cfg-embed-backup-bases' : 'cqst-cfg-chat-backup-bases';
     const def = PROVIDER_DEFAULTS[prov];
 
     const key = document.getElementById(keyId)?.value.trim() || '';
@@ -5068,8 +5615,13 @@ function stashCurrentProviderInputs(kind, prov) {
     const customModel = document.getElementById(customId)?.value.trim() || '';
     const selectModel = document.getElementById(modelId)?.value || '';
     const model = customModel || selectModel || (isEmbed ? def.embedModel : def.chatModel);
+    const backupBases = document.getElementById(backupBasesId)?.value || '';
 
-    drafts[kind][prov] = { key, base, model };
+    const next = { key, base, model, backupBases };
+    if (!isEmbed) {
+        next.backupModels = document.getElementById('cqst-cfg-chat-backup-models')?.value.trim() || '';
+    }
+    drafts[kind][prov] = next;
 }
 
 function applyProviderInputsToUI(kind, prov) {
@@ -5078,11 +5630,15 @@ function applyProviderInputsToUI(kind, prov) {
     const isEmbed = kind === 'embed';
     const keyId = isEmbed ? 'cqst-cfg-embed-key' : 'cqst-cfg-chat-key';
     const baseId = isEmbed ? 'cqst-cfg-embed-base' : 'cqst-cfg-chat-base';
+    const backupBasesId = isEmbed ? 'cqst-cfg-embed-backup-bases' : 'cqst-cfg-chat-backup-bases';
+    const detailsId = isEmbed ? 'cqst-cfg-embed-pool-details' : 'cqst-cfg-chat-pool-details';
     const def = PROVIDER_DEFAULTS[prov];
     const prof = drafts[kind][prov] || {
         key: '',
         base: def.base,
-        model: isEmbed ? def.embedModel : def.chatModel
+        model: isEmbed ? def.embedModel : def.chatModel,
+        backupBases: '',
+        backupModels: ''
     };
 
     const keyEl = document.getElementById(keyId);
@@ -5098,6 +5654,21 @@ function applyProviderInputsToUI(kind, prov) {
         if (!baseEl.value && def.base) baseEl.value = def.base;
         baseEl.placeholder = def.basePlaceholder;
     }
+
+    const backupBasesEl = document.getElementById(backupBasesId);
+    if (backupBasesEl) {
+        backupBasesEl.value = prof.backupBases || '';
+    }
+    if (!isEmbed) {
+        const backupModelsEl = document.getElementById('cqst-cfg-chat-backup-models');
+        if (backupModelsEl) backupModelsEl.value = prof.backupModels || '';
+    }
+
+    const detailsEl = document.getElementById(detailsId);
+    if (detailsEl) {
+        detailsEl.open = Boolean((prof.backupBases || '').trim() || (!isEmbed && (prof.backupModels || '').trim()));
+    }
+    updateNodePoolBadge(kind);
 }
 
 function populateSettingsModelSelects() {
@@ -5158,7 +5729,7 @@ function toggleSettingsConditionalBoxes() {
     const embProv = document.getElementById('cqst-cfg-embed-provider')?.value || 'same';
     const showEmbAuth = embProv !== 'same' && embProv !== 'local';
     const embBox = document.getElementById('cqst-cfg-embed-auth-box');
-    if (embBox) embBox.style.display = showEmbAuth ? 'grid' : 'none';
+    if (embBox) embBox.style.display = showEmbAuth ? 'flex' : 'none';
 
     const hint = document.getElementById('cqst-cfg-embed-hint');
     if (hint) {
@@ -5191,6 +5762,9 @@ function populateSettingsUI({ force = false } = {}) {
         embed: normalizeProviderProfiles(state.config.embedProfiles, true)
     };
 
+    const pollingEl = document.getElementById('cqst-cfg-polling-mode');
+    if (pollingEl) pollingEl.value = state.config.nodePollingMode === 'failover' ? 'failover' : 'round_robin';
+
     const activeChatProv = state.config.apiProvider || 'gemini';
     const chatProvEl = document.getElementById('cqst-cfg-api-provider');
     chatProvEl.value = activeChatProv;
@@ -5200,6 +5774,13 @@ function populateSettingsUI({ force = false } = {}) {
     } else {
         document.getElementById('cqst-cfg-chat-key').value = '';
         resetSecretFieldVisibility('cqst-cfg-chat-key');
+        const cbEl = document.getElementById('cqst-cfg-chat-backup-bases');
+        if (cbEl) cbEl.value = '';
+        const cmEl = document.getElementById('cqst-cfg-chat-backup-models');
+        if (cmEl) cmEl.value = '';
+        const cdEl = document.getElementById('cqst-cfg-chat-pool-details');
+        if (cdEl) cdEl.open = false;
+        updateNodePoolBadge('chat');
     }
 
     const activeEmbProv = state.config.embedProvider || 'same';
@@ -5212,6 +5793,11 @@ function populateSettingsUI({ force = false } = {}) {
         document.getElementById('cqst-cfg-embed-key').value = '';
         document.getElementById('cqst-cfg-embed-base').value = 'https://api.siliconflow.cn/v1';
         resetSecretFieldVisibility('cqst-cfg-embed-key');
+        const ebEl = document.getElementById('cqst-cfg-embed-backup-bases');
+        if (ebEl) ebEl.value = '';
+        const edEl = document.getElementById('cqst-cfg-embed-pool-details');
+        if (edEl) edEl.open = false;
+        updateNodePoolBadge('embed');
     }
 
     document.getElementById('cqst-cfg-rerank-enabled').checked = Boolean(state.config.rerankEnabled);
@@ -5339,6 +5925,45 @@ function openTagModal() {
 /* ============================================================================
    14. 在线模型拉取与事件绑定 (速控悬浮窗 + 顶部全景页 + 通用弹窗)
    ============================================================================ */
+async function fetchModelsFromSingleNode(resolved) {
+    let chatModels = [], embedModels = [], rerankModels = [];
+    const authHeaders = { 'Authorization': `Bearer ${resolved.key}` };
+
+    if (resolved.useOpenAI) {
+        if (resolved.base.includes('siliconflow.cn')) {
+            const [cRes, eRes, rRes] = await Promise.all([
+                fetchWithTimeout(`${resolved.base}/models?sub_type=chat`, { headers: authHeaders }, { timeoutMs: 20000, label: '拉取总结模型' }),
+                fetchWithTimeout(`${resolved.base}/models?sub_type=embedding`, { headers: authHeaders }, { timeoutMs: 20000, label: '拉取向量模型' }),
+                fetchWithTimeout(`${resolved.base}/models?sub_type=reranker`, { headers: authHeaders }, { timeoutMs: 20000, label: '拉取重排模型' })
+            ]);
+            if (cRes.ok) chatModels = ((await cRes.json()).data || []).map(m => m.id).filter(Boolean);
+            if (eRes.ok) embedModels = ((await eRes.json()).data || []).map(m => m.id).filter(Boolean);
+            if (rRes.ok) rerankModels = ((await rRes.json()).data || []).map(m => m.id).filter(Boolean);
+        }
+        if (!chatModels.length && !embedModels.length) {
+            const res = await fetchWithTimeout(`${resolved.base}/models`, { headers: authHeaders }, { timeoutMs: 20000, label: '拉取模型列表' });
+            if (!res.ok) throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}`);
+            const ids = ((await res.json()).data || []).map(m => m.id).filter(Boolean);
+            embedModels = ids.filter(id => /embed|bge-(?!rerank)|bce-embedding|m3e|jina-embeddings/i.test(id));
+            rerankModels = ids.filter(id => /rerank/i.test(id));
+            chatModels = ids.filter(id => !/embed|rerank|flux|stable-diffusion|whisper|tts|audio|video/i.test(id));
+        }
+    } else {
+        const res = await fetchWithTimeout(`${resolved.base}/v1beta/models?key=${encodeURIComponent(resolved.key)}&pageSize=100`, {}, { timeoutMs: 20000, label: '拉取 Gemini 模型' });
+        if (!res.ok) throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}`);
+        const data = await res.json();
+        (data.models || []).forEach(m => {
+            const id = (m.name || '').replace(/^models\//, '');
+            if (!id) return;
+            const methods = m.supportedGenerationMethods || [];
+            if (methods.includes('embedContent') || id.includes('embedding')) embedModels.push(id);
+            if (methods.includes('generateContent')) chatModels.push(id);
+        });
+    }
+
+    return { chatModels, embedModels, rerankModels };
+}
+
 async function fetchModelsFor(target) {
     const isEmbed = target === 'embed';
     const chatProv = document.getElementById('cqst-cfg-api-provider').value || 'gemini';
@@ -5350,54 +5975,43 @@ async function fetchModelsFor(target) {
         return;
     }
 
-    const rawKey = (isEmbed && embProv !== 'same')
+    const useSeparateEmbed = isEmbed && embProv !== 'same';
+    const rawKey = (useSeparateEmbed
         ? document.getElementById('cqst-cfg-embed-key').value.trim()
-        : document.getElementById('cqst-cfg-chat-key').value.trim();
-    const rawBase = (isEmbed && embProv !== 'same')
+        : document.getElementById('cqst-cfg-chat-key').value.trim()) || '';
+    const rawBase = (useSeparateEmbed
         ? document.getElementById('cqst-cfg-embed-base').value.trim()
-        : document.getElementById('cqst-cfg-chat-base').value.trim();
+        : document.getElementById('cqst-cfg-chat-base').value.trim()) || '';
+    const backupBases = (useSeparateEmbed
+        ? document.getElementById('cqst-cfg-embed-backup-bases')?.value
+        : document.getElementById('cqst-cfg-chat-backup-bases')?.value) || '';
+    const pollingMode = document.getElementById('cqst-cfg-polling-mode')?.value || state.config.nodePollingMode || 'round_robin';
 
-    if (!rawKey) {
+    const candidates = buildEndpointCandidates({ provider: effProv, rawKey, rawBase, backupBases });
+    if (!candidates.length) {
         showToast('请先填写 API Key', '填入 Key 后再拉取模型列表', 'warn');
         return;
     }
 
-    const resolved = resolveApiEndpoint(effProv, rawKey, rawBase);
-    let chatModels = [], embedModels = [], rerankModels = [];
+    const ordered = pickOrderedCandidates(candidates, isEmbed ? 'embed' : 'chat', pollingMode);
+    let lastErr = null;
+    let fetched = null;
+    let usedNode = ordered[0];
 
-    if (resolved.useOpenAI) {
-        if (resolved.base.includes('siliconflow.cn')) {
-            const [cRes, eRes, rRes] = await Promise.all([
-                fetch(`${resolved.base}/models?sub_type=chat`, { headers: { 'Authorization': `Bearer ${resolved.key}` } }),
-                fetch(`${resolved.base}/models?sub_type=embedding`, { headers: { 'Authorization': `Bearer ${resolved.key}` } }),
-                fetch(`${resolved.base}/models?sub_type=reranker`, { headers: { 'Authorization': `Bearer ${resolved.key}` } })
-            ]);
-            if (cRes.ok) chatModels = ((await cRes.json()).data || []).map(m => m.id).filter(Boolean);
-            if (eRes.ok) embedModels = ((await eRes.json()).data || []).map(m => m.id).filter(Boolean);
-            if (rRes.ok) rerankModels = ((await rRes.json()).data || []).map(m => m.id).filter(Boolean);
+    for (const node of ordered) {
+        try {
+            fetched = await fetchModelsFromSingleNode(node);
+            usedNode = node;
+            break;
+        } catch (err) {
+            lastErr = err;
         }
-        if (!chatModels.length && !embedModels.length) {
-            const res = await fetch(`${resolved.base}/models`, { headers: { 'Authorization': `Bearer ${resolved.key}` } });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const ids = ((await res.json()).data || []).map(m => m.id).filter(Boolean);
-            embedModels = ids.filter(id => /embed|bge-(?!rerank)|bce-embedding|m3e|jina-embeddings/i.test(id));
-            rerankModels = ids.filter(id => /rerank/i.test(id));
-            chatModels = ids.filter(id => !/embed|rerank|flux|stable-diffusion|whisper|tts|audio|video/i.test(id));
-        }
-    } else {
-        const res = await fetch(`${resolved.base}/v1beta/models?key=${encodeURIComponent(resolved.key)}&pageSize=100`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        (data.models || []).forEach(m => {
-            const id = (m.name || '').replace(/^models\//, '');
-            if (!id) return;
-            const methods = m.supportedGenerationMethods || [];
-            if (methods.includes('embedContent') || id.includes('embedding')) embedModels.push(id);
-            if (methods.includes('generateContent')) chatModels.push(id);
-        });
     }
 
-    const pKey = resolved.provider;
+    if (!fetched) throw lastErr || new Error('模型列表拉取失败');
+
+    const pKey = PRESET_MODELS[effProv] ? effProv : usedNode.provider;
+    let { chatModels, embedModels, rerankModels } = fetched;
     if (!chatModels.length) chatModels = PRESET_MODELS[pKey]?.chat || PRESET_MODELS.openai.chat;
     if (!embedModels.length) embedModels = PRESET_MODELS[pKey]?.embed || PRESET_MODELS.openai.embed;
     if (!rerankModels.length) rerankModels = PRESET_MODELS[pKey]?.rerank || PRESET_MODELS.siliconflow.rerank;
@@ -5405,23 +6019,8 @@ async function fetchModelsFor(target) {
     state.fetchedModels[pKey] = { chat: chatModels, embed: embedModels, rerank: rerankModels };
     saveSettings();
     populateSettingsModelSelects();
-    showToast('模型拉取成功', isEmbed ? `向量 ${embedModels.length} 个 / 重排 ${rerankModels.length} 个` : `总结模型 ${chatModels.length} 个`);
-}
-
-function formatHttpErrorHint(status) {
-    if (status === 502 || status === 503 || status === 504) {
-        return '（服务端过载或所选模型渠道暂不可用，建议换一个模型再试）';
-    }
-    if (status === 401 || status === 403) {
-        return '（Key 无效、余额不足或无该模型权限）';
-    }
-    if (status === 404) {
-        return '（接口路径不对或该模型名不存在）';
-    }
-    if (status === 429) {
-        return '（触发限流或额度耗尽）';
-    }
-    return '';
+    const nodeSuffix = candidates.length > 1 ? ` · 节点 ${usedNode.nodeIndex}/${usedNode.nodeTotal} (${usedNode.label})` : '';
+    showToast('模型拉取成功', `${isEmbed ? `向量 ${embedModels.length} 个 / 重排 ${rerankModels.length} 个` : `总结模型 ${chatModels.length} 个`}${nodeSuffix}`);
 }
 
 function setInlineTestResult(boxId, status = '', text = '') {
@@ -5451,23 +6050,30 @@ async function testChatConnectionFromUI() {
     const provider = document.getElementById('cqst-cfg-api-provider')?.value || 'gemini';
     const rawKey = document.getElementById('cqst-cfg-chat-key')?.value.trim() || '';
     const rawBase = document.getElementById('cqst-cfg-chat-base')?.value.trim() || '';
+    const backupBases = document.getElementById('cqst-cfg-chat-backup-bases')?.value || '';
+    const backupModels = splitBackupModels(document.getElementById('cqst-cfg-chat-backup-models')?.value || '');
+    const pollingMode = document.getElementById('cqst-cfg-polling-mode')?.value || state.config.nodePollingMode || 'round_robin';
     const customModel = document.getElementById('cqst-cfg-chat-model-custom')?.value.trim() || '';
     const selectModel = document.getElementById('cqst-cfg-chat-model')?.value || '';
+    const rawPicked = customModel || selectModel || '';
 
-    if (provider !== 'st_current' && !rawKey) {
+    const candidates = provider === 'st_current'
+        ? []
+        : buildEndpointCandidates({ provider, rawKey, rawBase, backupBases });
+
+    if (provider !== 'st_current' && candidates.length === 0) {
         const msg = '❌ 请先填写当前接口的 API Key';
         setInlineTestResult('cqst-cfg-chat-test-result', 'err', msg);
         showToast('请先填写 API Key', '填入 Key 后再点测试消息', 'warn');
         return;
     }
 
-    const resolved = resolveApiEndpoint(provider, rawKey, rawBase);
-    const defaultModel = PROVIDER_DEFAULTS[resolved.provider]?.chatModel || 'gpt-4o-mini';
-    const rawPicked = customModel || selectModel || '';
-    const model = resolved.useOpenAI
-        ? ((!rawPicked || rawPicked.startsWith('gemini-')) ? defaultModel : rawPicked)
-        : (rawPicked || 'gemini-2.5-flash');
-    const modelLabel = provider === 'st_current' ? '酒馆当前主 API' : `${provider} · ${model}`;
+    const initialModel = candidates.length
+        ? resolveModelForCandidate(candidates[0], rawPicked, false)
+        : '酒馆当前主 API';
+    const modelLabel = provider === 'st_current'
+        ? '酒馆当前主 API'
+        : `${provider} · ${initialModel}${candidates.length > 1 ? ` · ${candidates.length}节点` : ''}`;
 
     chatTestAbort = new AbortController();
     const signal = chatTestAbort.signal;
@@ -5477,6 +6083,7 @@ async function testChatConnectionFromUI() {
 
     try {
         let replyText = '';
+        let okLabel = modelLabel;
         if (provider === 'st_current') {
             const ctx = getSTContext();
             if (typeof ctx?.generateQuietPrompt !== 'function') {
@@ -5489,58 +6096,45 @@ async function testChatConnectionFromUI() {
                 ? ctx.generateQuietPrompt({ quietPrompt: prompt, skipWIAN: true })
                 : ctx.generateQuietPrompt(prompt, false, true);
             replyText = String(await raceWithSignalAndTimeout(quietCall, { timeoutMs: 30000, signal, label: '酒馆主 API 测试' }) || '');
-        } else if (resolved.useOpenAI) {
-            const res = await fetchWithTimeout(`${resolved.base}/chat/completions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${resolved.key}`
-                },
-                body: JSON.stringify({
-                    model,
-                    messages: [{ role: 'user', content: '请仅回复 OK' }],
-                    max_tokens: 128,
-                    temperature: 0
-                })
-            }, { timeoutMs: 30000, signal, label: '总结测试消息' });
-            if (!res.ok) {
-                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
-                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+            if (!replyText.replace(/\s+/g, ' ').trim()) {
+                throw new Error('接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文');
             }
-            const data = await res.json();
-            const msg = data.choices?.[0]?.message;
-            replyText = String(msg?.content || msg?.reasoning_content || '');
         } else {
-            const res = await fetchWithTimeout(`${resolved.base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(resolved.key)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    contents: [{ role: 'user', parts: [{ text: '请仅回复 OK' }] }],
-                    safetySettings: [
-                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-                        { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' }
-                    ]
+            const timeoutMs = candidates.length > 1 ? 20000 : 30000;
+            const res = await runWithNodePolling({
+                scopeKey: 'chat',
+                candidates,
+                primaryModel: rawPicked,
+                backupModels,
+                mode: pollingMode,
+                isEmbed: false,
+                signal,
+                singleNodeRetries: 1,
+                onStatus: (msg) => setInlineTestResult('cqst-cfg-chat-test-result', 'pending', `⏳ ${msg}`),
+                executeAttempt: (node, model) => callChatSingleNode(node, model, {
+                    userText: '请仅回复 OK',
+                    maxTokens: 128,
+                    temperature: 0,
+                    timeoutMs,
+                    signal,
+                    label: '总结测试消息',
+                    includeReasoning: true,
+                    requireNonEmpty: true
                 })
-            }, { timeoutMs: 30000, signal, label: 'Gemini 测试消息' });
-            if (!res.ok) {
-                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
-                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
-            }
-            const data = await res.json();
-            replyText = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+            });
+            replyText = res.value;
+            const nodePart = candidates.length > 1
+                ? `节点 ${res.node.nodeIndex}/${res.node.nodeTotal} [${res.node.label}]`
+                : res.node.provider;
+            const switchPart = res.switchedFromCount > 0 ? ` · 已跳过 ${res.switchedFromCount} 次异常` : '';
+            okLabel = `${nodePart} · ${res.model}${switchPart}`;
         }
 
         const cleanReply = replyText.replace(/\s+/g, ' ').trim();
-        if (!cleanReply) {
-            throw new Error('接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文');
-        }
         const sec = ((performance.now() - t0) / 1000).toFixed(1);
         const snippet = cleanReply.length > 60 ? `${cleanReply.slice(0, 60)}...` : cleanReply;
-        setInlineTestResult('cqst-cfg-chat-test-result', 'ok', `✅ 测试通过（${sec}s · ${modelLabel}）· 回复：「${snippet}」`);
-        showToast('总结接口可用', `${modelLabel} 响应正常 (${sec}s)`, 'ok');
+        setInlineTestResult('cqst-cfg-chat-test-result', 'ok', `✅ 测试通过（${sec}s · ${okLabel}）· 回复：「${snippet}」`);
+        showToast('总结接口可用', `${okLabel} (${sec}s)`, 'ok');
     } catch (err) {
         if (isAbortError(err)) {
             setInlineTestResult('cqst-cfg-chat-test-result', '', '');
@@ -5581,23 +6175,26 @@ async function testEmbedConnectionFromUI() {
     const rawBase = (embProv === 'same'
         ? document.getElementById('cqst-cfg-chat-base')?.value.trim()
         : document.getElementById('cqst-cfg-embed-base')?.value.trim()) || '';
+    const backupBases = (embProv === 'same'
+        ? document.getElementById('cqst-cfg-chat-backup-bases')?.value
+        : document.getElementById('cqst-cfg-embed-backup-bases')?.value) || '';
+    const pollingMode = document.getElementById('cqst-cfg-polling-mode')?.value || state.config.nodePollingMode || 'round_robin';
     const customModel = document.getElementById('cqst-cfg-embed-model-custom')?.value.trim() || '';
     const selectModel = document.getElementById('cqst-cfg-embed-model')?.value || '';
+    const rawPicked = customModel || selectModel || '';
 
-    if (!rawKey) {
+    const candidates = buildEndpointCandidates({ provider: effProv, rawKey, rawBase, backupBases });
+    if (candidates.length === 0) {
         const msg = '❌ 请先填写对应的向量 API Key';
         setInlineTestResult('cqst-cfg-embed-test-result', 'err', msg);
         showToast('请先填写向量 Key', '填入 Key 后再测试向量', 'warn');
         return;
     }
 
-    const resolved = resolveApiEndpoint(effProv, rawKey, rawBase);
-    const defaultEmb = PROVIDER_DEFAULTS[resolved.provider]?.embedModel || 'BAAI/bge-m3';
-    const rawPicked = customModel || selectModel || '';
-    const model = resolved.useOpenAI
-        ? ((!rawPicked || rawPicked.includes('text-embedding-004') || rawPicked.includes('gemini-embedding')) ? defaultEmb : rawPicked)
-        : (rawPicked || 'text-embedding-004');
-    const modelLabel = `${effProv} · ${model}`;
+    const initialModel = resolveModelForCandidate(candidates[0], rawPicked, true);
+    const modelLabel = `${effProv} · ${initialModel}${candidates.length > 1 ? ` · ${candidates.length}节点` : ''}`;
+    const hasGemini = candidates.some(c => !c.useOpenAI);
+    const backupModels = hasGemini ? ['gemini-embedding-001'] : [];
 
     embedTestAbort = new AbortController();
     const signal = embedTestAbort.signal;
@@ -5606,42 +6203,34 @@ async function testEmbedConnectionFromUI() {
     setInlineTestResult('cqst-cfg-embed-test-result', 'pending', `⏳ 正在测试向量接口 [${modelLabel}]...`);
 
     try {
-        let vec = null;
-        if (resolved.useOpenAI) {
-            const res = await fetchWithTimeout(`${resolved.base}/embeddings`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${resolved.key}`
-                },
-                body: JSON.stringify({ model, input: '记忆库向量连通性测试', encoding_format: 'float' })
-            }, { timeoutMs: 25000, signal, label: '向量接口测试' });
-            if (!res.ok) {
-                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
-                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
-            }
-            const data = await res.json();
-            vec = data.data?.[0]?.embedding;
-        } else {
-            const res = await fetchWithTimeout(`${resolved.base}/v1beta/models/${model}:embedContent?key=${encodeURIComponent(resolved.key)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text: '记忆库向量连通性测试' }] } })
-            }, { timeoutMs: 25000, signal, label: 'Gemini 向量测试' });
-            if (!res.ok) {
-                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
-                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
-            }
-            const data = await res.json();
-            vec = data.embedding?.values;
-        }
+        const timeoutMs = candidates.length > 1 ? 15000 : 25000;
+        const res = await runWithNodePolling({
+            scopeKey: 'embed',
+            candidates,
+            primaryModel: rawPicked,
+            backupModels,
+            mode: pollingMode,
+            isEmbed: true,
+            signal,
+            singleNodeRetries: 1,
+            onStatus: (msg) => setInlineTestResult('cqst-cfg-embed-test-result', 'pending', `⏳ ${msg}`),
+            executeAttempt: (node, model) => callEmbedSingleNode(node, model, {
+                text: '记忆库向量连通性测试',
+                timeoutMs,
+                signal,
+                label: '向量接口测试'
+            })
+        });
 
-        if (!Array.isArray(vec) || vec.length === 0) {
-            throw new Error('接口返回空向量数据');
-        }
+        const vec = res.value;
+        const nodePart = candidates.length > 1
+            ? `节点 ${res.node.nodeIndex}/${res.node.nodeTotal} [${res.node.label}]`
+            : res.node.provider;
+        const switchPart = res.switchedFromCount > 0 ? ` · 已跳过 ${res.switchedFromCount} 次异常` : '';
+        const okLabel = `${nodePart} · ${res.model}${switchPart}`;
         const sec = ((performance.now() - t0) / 1000).toFixed(1);
-        setInlineTestResult('cqst-cfg-embed-test-result', 'ok', `✅ 向量测试通过（${sec}s · ${vec.length} 维 · ${modelLabel}）`);
-        showToast('向量接口可用', `${modelLabel} 返回 ${vec.length} 维向量 (${sec}s)`, 'ok');
+        setInlineTestResult('cqst-cfg-embed-test-result', 'ok', `✅ 向量测试通过（${sec}s · ${vec.length} 维 · ${okLabel}）`);
+        showToast('向量接口可用', `${okLabel} 返回 ${vec.length} 维向量 (${sec}s)`, 'ok');
     } catch (err) {
         if (isAbortError(err)) {
             setInlineTestResult('cqst-cfg-embed-test-result', '', '');
@@ -6424,6 +7013,7 @@ function bindTopDrawerEvents() {
         stashCurrentProviderInputs('chat', prev);
         e.target.dataset.prevProvider = next;
         applyProviderInputsToUI('chat', next);
+        updateNodePoolBadge('chat');
         setInlineTestResult('cqst-cfg-chat-test-result', '', '');
         toggleSettingsConditionalBoxes();
         populateSettingsModelSelects();
@@ -6435,9 +7025,17 @@ function bindTopDrawerEvents() {
         stashCurrentProviderInputs('embed', prev);
         e.target.dataset.prevProvider = next;
         applyProviderInputsToUI('embed', next);
+        updateNodePoolBadge('embed');
         setInlineTestResult('cqst-cfg-embed-test-result', '', '');
         toggleSettingsConditionalBoxes();
         populateSettingsModelSelects();
+    });
+
+    ['cqst-cfg-chat-key', 'cqst-cfg-chat-base', 'cqst-cfg-chat-backup-bases', 'cqst-cfg-chat-backup-models'].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', () => updateNodePoolBadge('chat'));
+    });
+    ['cqst-cfg-embed-key', 'cqst-cfg-embed-base', 'cqst-cfg-embed-backup-bases'].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', () => updateNodePoolBadge('embed'));
     });
 
     document.querySelectorAll('.cqst-toggle-secret').forEach(btn => {
@@ -6629,6 +7227,8 @@ function bindTopDrawerEvents() {
 
         state.config.chatProfiles = normalizeProviderProfiles(drafts.chat, false);
         state.config.embedProfiles = normalizeProviderProfiles(drafts.embed, true);
+        state.config.nodePollingMode = document.getElementById('cqst-cfg-polling-mode')?.value === 'failover' ? 'failover' : 'round_robin';
+        state.nodeCursors = { chat: 0, embed: 0, rerank: 0 };
 
         state.config.apiProvider = chatProv;
         if (PROVIDER_DEFAULTS[chatProv]) {
