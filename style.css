@@ -304,6 +304,7 @@ html[data-cqst-theme="night"] {
    3. 顶部栏原生下拉全景页 (#cqst-top-drawer & #cqst-top-drawer-content)
    ============================================================================ */
 #cqst-top-drawer-toggle {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -732,17 +733,22 @@ html[data-cqst-theme="night"] {
 }
 
 .cqst-status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
+    display: inline-block;
     font-family: var(--cqst-font-mono);
     font-size: 11px;
     font-weight: 700;
+    line-height: 1.45;
     padding: 2px 8px;
     border-radius: 50px;
     background: rgba(var(--cqst-rgb-brown-light), 0.14);
     color: var(--cqst-text-strong);
     white-space: nowrap;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    box-sizing: border-box;
 }
 
 .cqst-status-pill.github {
@@ -845,6 +851,80 @@ html[data-cqst-theme="night"] {
     background: var(--cqst-green);
     color: #ffffff;
     border-color: var(--cqst-green);
+}
+
+.cqst-new-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1px 7px;
+    border-radius: 50px;
+    background: var(--cqst-red);
+    color: #ffffff;
+    font-family: var(--cqst-font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    line-height: 1.4;
+    box-shadow: 0 2px 6px rgba(217, 83, 79, 0.35);
+    flex-shrink: 0;
+}
+
+.cqst-update-dot {
+    position: absolute;
+    top: 5px;
+    right: 3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--cqst-red);
+    border: 1.5px solid var(--cqst-bg-light);
+    pointer-events: none;
+    box-shadow: 0 0 0 2px rgba(217, 83, 79, 0.22);
+}
+
+.cqst-hero-title-wrap {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.cqst-hero-ver {
+    font-family: var(--cqst-font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--cqst-text-faded);
+    padding: 1px 7px;
+    border-radius: 50px;
+    border: 1px dashed var(--cqst-border);
+    background: var(--cqst-bg-input);
+}
+
+.cqst-update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--cqst-danger-hover-bg);
+    border: 1px dashed var(--cqst-red);
+    color: var(--cqst-text-strong);
+    font-size: 12px;
+}
+
+.cqst-update-banner-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    flex-wrap: wrap;
+    min-width: 0;
+    flex: 1 1 180px;
+    font-weight: 700;
+    line-height: 1.4;
 }
 
 .cqst-link-btn {
@@ -1465,6 +1545,10 @@ input[type="checkbox"].cqst-checkbox:checked::after {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    box-sizing: border-box;
     font-family: var(--cqst-font-sans);
 }
 

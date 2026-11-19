@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.9';
+const PLUGIN_VERSION = '1.0.10';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -2767,15 +2767,15 @@ function mountBaseContainers() {
         <!-- 简要抓取总结 & 存储 -->
         <div class="cqst-card">
             <div class="cqst-row">
-                <span style="font-size:12px;font-weight:700;">📥 抓取总结并存入</span>
-                <div style="display:flex;align-items:center;gap:4px;">
-                    <select id="cqst-mini-scrape-turns" class="cqst-select compact-h" style="width:auto;">
+                <span style="font-size:12px;font-weight:700;white-space:nowrap;flex-shrink:0;">📥 抓取归档</span>
+                <div style="display:flex;align-items:center;gap:4px;min-width:0;flex:1;justify-content:flex-end;">
+                    <select id="cqst-mini-scrape-turns" class="cqst-select compact-h" style="width:auto;min-width:0;max-width:136px;">
                         <option value="unarchived">✨ 未归档新楼层</option>
                         <option value="3">最近 3 轮（推荐）</option>
                         <option value="5">最近 5 轮</option>
                         <option value="10">最近 10 轮</option>
                     </select>
-                    <button type="button" class="cqst-btn sm" id="cqst-mini-scrape-btn">🔍 抓取</button>
+                    <button type="button" class="cqst-btn sm" id="cqst-mini-scrape-btn" style="flex-shrink:0;">🔍 抓取</button>
                 </div>
             </div>
             <select id="cqst-mini-scrape-preset" class="cqst-select compact-h" title="切换正文抓取与清洗规则预设"></select>
@@ -2957,8 +2957,21 @@ function mountBaseContainers() {
 
 function buildTopDrawerContentHTML() {
     return `
+        <div class="cqst-update-banner" id="cqst-top-update-banner" style="display:none;">
+            <div class="cqst-update-banner-text">
+                <span class="cqst-new-badge">NEW</span>
+                <span id="cqst-top-update-banner-msg">发现插件新版本，点击即可一键更新</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                <button type="button" class="cqst-btn sm update-ready" id="cqst-top-banner-update-btn">🚀 立即更新</button>
+                <button type="button" class="cqst-btn sm icon-only" id="cqst-top-banner-dismiss-btn" title="本次暂不显示此横幅">✕</button>
+            </div>
+        </div>
         <div class="cqst-hero-header">
-            <h3 class="cqst-hero-title"><span>记忆档案馆</span></h3>
+            <div class="cqst-hero-title-wrap">
+                <h3 class="cqst-hero-title"><span>记忆档案馆</span></h3>
+                <span class="cqst-hero-ver" id="cqst-hero-version-tag">v${PLUGIN_VERSION}</span>
+            </div>
             <div class="cqst-hero-meta">
                 <span class="cqst-status-pill" id="cqst-top-storage-pill">💾 本地存储</span>
                 <span class="cqst-status-pill" id="cqst-top-comp-pill">🌿 tavern_default</span>
@@ -3419,6 +3432,7 @@ function mountSillyTavernHooks() {
         topDrawer.innerHTML = `
             <div id="cqst-top-drawer-toggle" class="cqst-top-toggle" title="✉️ 信笺 | 外置记忆库全景页">
                 <div class="drawer-icon fa-solid fa-envelope-open-text fa-fw closedIcon"></div>
+                <span class="cqst-update-dot" id="cqst-top-icon-dot" style="display:none;" title="发现信笺记忆库新版本"></span>
             </div>
             <div id="cqst-top-drawer-content" class="drawer-content closedDrawer">
                 ${buildTopDrawerContentHTML()}
@@ -3436,6 +3450,7 @@ function mountSillyTavernHooks() {
         syncRenameInputsUI();
         renderAllUI();
         renderPendingDraftsUI();
+        renderUpdateNoticeUI();
     }
 
     // 2. 酒馆「扩展」设置页内嵌控制区 (#extensions_settings2 或 #extensions_settings)
@@ -3446,14 +3461,17 @@ function mountSillyTavernHooks() {
         drawerWrap.className = 'inline-drawer';
         drawerWrap.innerHTML = `
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>✉️ 信笺 | 外置向量记忆库</b>
+                <span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;">
+                    <b>✉️ 信笺 | 外置向量记忆库</b>
+                    <span class="cqst-new-badge" id="cqst-ext-header-new-badge" style="display:none;">NEW</span>
+                </span>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
                 <div class="cqst-st-settings-box">
                     <div class="cqst-row-wrap">
                         <span style="font-size:12px;">当前隔间：<strong id="cqst-ext-cur-compartment">tavern_default</strong></span>
-                        <div style="display:flex;align-items:center;gap:5px;">
+                        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0;max-width:100%;">
                             <span class="cqst-status-pill" id="cqst-ext-version-pill">v${PLUGIN_VERSION}</span>
                             <span class="cqst-status-pill" id="cqst-ext-storage-pill">💾 本地模式</span>
                         </div>
@@ -3494,6 +3512,7 @@ function mountSillyTavernHooks() {
             if (state.updateInfo.hasUpdate) triggerPluginOneClickUpdate();
             else checkPluginUpdate({ manual: true });
         });
+        renderUpdateNoticeUI();
     }
 
     // 3. 酒馆输入框旁「魔法棒」扩展菜单入口 (#extensionsMenu)
@@ -3633,6 +3652,7 @@ function toggleTopDrawer(forceOpen = null) {
         populateSettingsUI();
         renderBranchManagerList();
         renderAllUI();
+        maybeAutoCheckPluginUpdate(3 * 60 * 1000);
     } else {
         state.topDrawerOpen = false;
         content.classList.remove('openDrawer', 'resizing');
@@ -4418,10 +4438,47 @@ function detectInstalledExtensionNames() {
     return names;
 }
 
+let lastUpdateCheckAt = 0;
+let updateCheckInFlight = false;
+let lastNotifiedRemoteVer = '';
+let dismissedUpdateBannerVer = '';
+
 function renderUpdateNoticeUI() {
     const info = state.updateInfo || {};
     const hasUpdate = Boolean(info.hasUpdate);
     const verSuffix = info.remoteVersion ? ` v${info.remoteVersion}` : '';
+    const verKey = info.remoteVersion || 'new';
+
+    const topDot = document.getElementById('cqst-top-icon-dot');
+    if (topDot) {
+        topDot.style.display = hasUpdate ? 'block' : 'none';
+        topDot.title = hasUpdate ? `发现新版本${verSuffix}，点击打开更新` : '';
+    }
+
+    const extHeaderBadge = document.getElementById('cqst-ext-header-new-badge');
+    if (extHeaderBadge) {
+        extHeaderBadge.style.display = hasUpdate ? 'inline-flex' : 'none';
+        extHeaderBadge.textContent = info.remoteVersion ? `NEW v${info.remoteVersion}` : 'NEW';
+    }
+
+    const heroVer = document.getElementById('cqst-hero-version-tag');
+    if (heroVer) {
+        heroVer.textContent = (hasUpdate && info.remoteVersion)
+            ? `v${PLUGIN_VERSION} → v${info.remoteVersion}`
+            : `v${PLUGIN_VERSION}`;
+    }
+
+    const topBanner = document.getElementById('cqst-top-update-banner');
+    const topBannerMsg = document.getElementById('cqst-top-update-banner-msg');
+    if (topBanner) {
+        const showBanner = hasUpdate && verKey !== dismissedUpdateBannerVer;
+        topBanner.style.display = showBanner ? 'flex' : 'none';
+        if (topBannerMsg && showBanner) {
+            topBannerMsg.textContent = info.remoteVersion
+                ? `发现信笺记忆库新版本 v${info.remoteVersion}（当前 v${PLUGIN_VERSION}）`
+                : `检测到 GitHub 仓库有新提交（当前 v${PLUGIN_VERSION}）`;
+        }
+    }
 
     const topBtn = document.getElementById('cqst-top-update-btn');
     if (topBtn) {
@@ -4481,6 +4538,10 @@ async function getSTRequestHeadersSafe() {
 }
 
 async function checkPluginUpdate({ manual = false } = {}) {
+    if (updateCheckInFlight && !manual) return state.updateInfo;
+    updateCheckInFlight = true;
+    lastUpdateCheckAt = Date.now();
+
     if (manual) {
         showToast('正在检查更新...', `当前版本 v${PLUGIN_VERSION}`, 'info', 2000);
     }
@@ -4490,68 +4551,108 @@ async function checkPluginUpdate({ manual = false } = {}) {
     let errMsg = '';
 
     try {
-        const res = await fetch(`${PLUGIN_REMOTE_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const remote = await res.json();
-        if (remote?.version) {
-            remoteVersion = String(remote.version).trim();
-            if (compareSemver(remoteVersion, PLUGIN_VERSION) > 0) {
-                hasUpdate = true;
-            }
-        }
-    } catch (e) {
-        errMsg = e?.message || String(e);
-    }
-
-    // 同步尝试用酒馆自带版本接口核对 Git 提交是否落后
-    if (!hasUpdate) {
         try {
-            const headers = await getSTRequestHeadersSafe();
-            for (const extensionName of detectInstalledExtensionNames()) {
-                const vRes = await fetch('/api/extensions/version', {
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify({ extensionName })
-                });
-                if (vRes.ok) {
-                    const vData = await vRes.json();
-                    if (vData && vData.isUpToDate === false) {
-                        hasUpdate = true;
-                    }
-                    break;
+            const res = await fetchWithTimeout(`${PLUGIN_REMOTE_MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' }, { timeoutMs: 10000, label: '检查更新' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const remote = await res.json();
+            if (remote?.version) {
+                remoteVersion = String(remote.version).trim();
+                if (compareSemver(remoteVersion, PLUGIN_VERSION) > 0) {
+                    hasUpdate = true;
                 }
             }
-        } catch (e) {}
-    }
-
-    state.updateInfo = {
-        checked: true,
-        hasUpdate,
-        remoteVersion: remoteVersion || (hasUpdate ? '新版' : PLUGIN_VERSION),
-        error: errMsg
-    };
-    renderUpdateNoticeUI();
-
-    if (hasUpdate) {
-        const label = remoteVersion ? `v${remoteVersion}` : '新提交';
-        showToast(
-            `✨ 发现插件新版本 (${label})`,
-            `当前 v${PLUGIN_VERSION}，点击顶栏「🆕 更新」或设置里的按钮即可升级`,
-            'info',
-            5200
-        );
-    } else if (manual) {
-        if (errMsg && !remoteVersion) {
-            showToast('检查更新失败', `无法连接 GitHub：${errMsg}`, 'warn');
-        } else {
-            showToast(`已是最新版 (v${PLUGIN_VERSION})`, `已与 ${PLUGIN_REPO} 对齐`, 'ok');
+        } catch (e) {
+            errMsg = e?.message || String(e);
         }
+
+        // 若 raw 失败或手动检查仍显示未更新（绕过 raw CDN 5 分钟缓存），再读 GitHub API manifest.json
+        if (!remoteVersion || (manual && !hasUpdate)) {
+            try {
+                const apiUrl = `https://api.github.com/repos/${PLUGIN_REPO}/contents/manifest.json?t=${Date.now()}`;
+                const apiRes = await fetchWithTimeout(apiUrl, {
+                    headers: { 'Accept': 'application/vnd.github+json' },
+                    cache: 'no-store'
+                }, { timeoutMs: 10000, label: 'GitHub API 检查更新' });
+                if (apiRes.ok) {
+                    const data = await apiRes.json();
+                    if (data?.content) {
+                        const remote = JSON.parse(base64ToUtf8(data.content));
+                        if (remote?.version) {
+                            remoteVersion = String(remote.version).trim();
+                            errMsg = '';
+                            if (compareSemver(remoteVersion, PLUGIN_VERSION) > 0) {
+                                hasUpdate = true;
+                            }
+                        }
+                    }
+                }
+            } catch (e2) {
+                if (!errMsg) errMsg = e2?.message || String(e2);
+            }
+        }
+
+        // 同步尝试用酒馆自带版本接口核对 Git 提交是否落后
+        if (!hasUpdate) {
+            try {
+                const headers = await getSTRequestHeadersSafe();
+                for (const extensionName of detectInstalledExtensionNames()) {
+                    const vRes = await fetch('/api/extensions/version', {
+                        method: 'POST',
+                        headers,
+                        body: JSON.stringify({ extensionName })
+                    });
+                    if (vRes.ok) {
+                        const vData = await vRes.json();
+                        if (vData && vData.isUpToDate === false) {
+                            hasUpdate = true;
+                        }
+                        break;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        state.updateInfo = {
+            checked: true,
+            hasUpdate,
+            remoteVersion: remoteVersion || (hasUpdate ? '新版' : PLUGIN_VERSION),
+            error: errMsg
+        };
+        renderUpdateNoticeUI();
+
+        if (hasUpdate) {
+            const verKey = remoteVersion || 'new';
+            if (manual || verKey !== lastNotifiedRemoteVer) {
+                lastNotifiedRemoteVer = verKey;
+                const label = remoteVersion ? `v${remoteVersion}` : '新提交';
+                showToast(
+                    `✨ 发现插件新版本 (${label})`,
+                    `当前 v${PLUGIN_VERSION}，点击顶栏「🆕 更新」或设置里的按钮即可升级`,
+                    'info',
+                    5200
+                );
+            }
+        } else if (manual) {
+            if (errMsg && !remoteVersion) {
+                showToast('检查更新失败', `无法连接 GitHub：${errMsg}`, 'warn');
+            } else {
+                showToast(`已是最新版 (v${PLUGIN_VERSION})`, `已与 ${PLUGIN_REPO} 对齐`, 'ok');
+            }
+        }
+        return state.updateInfo;
+    } finally {
+        updateCheckInFlight = false;
     }
-    return state.updateInfo;
+}
+
+function maybeAutoCheckPluginUpdate(minIntervalMs = 180000) {
+    if (updateCheckInFlight) return;
+    if (Date.now() - lastUpdateCheckAt < minIntervalMs) return;
+    checkPluginUpdate({ manual: false }).catch(() => {});
 }
 
 async function triggerPluginOneClickUpdate() {
-    const btns = ['cqst-top-update-btn', 'cqst-btn-update-plugin', 'cqst-ext-update-btn']
+    const btns = ['cqst-top-update-btn', 'cqst-top-banner-update-btn', 'cqst-btn-update-plugin', 'cqst-ext-update-btn']
         .map(id => document.getElementById(id))
         .filter(Boolean);
     btns.forEach(b => { b.disabled = true; });
@@ -4649,11 +4750,13 @@ function renderAllUI() {
     const topStorage = document.getElementById('cqst-top-storage-pill');
     if (topStorage) {
         topStorage.textContent = storageText;
+        topStorage.title = storageText;
         topStorage.classList.toggle('github', isGh);
     }
     const topComp = document.getElementById('cqst-top-comp-pill');
     if (topComp) {
         topComp.textContent = `🌿 ${state.currentCompartment}`;
+        topComp.title = state.currentCompartment;
         topComp.classList.toggle('custom', state.isCustomBound);
     }
     const topDepth = document.getElementById('cqst-top-depth-pill');
@@ -4701,6 +4804,7 @@ function renderAllUI() {
     const extPill = document.getElementById('cqst-ext-storage-pill');
     if (extPill) {
         extPill.textContent = storageText;
+        extPill.title = storageText;
         extPill.classList.toggle('github', isGh);
     }
     const extShowPill = document.getElementById('cqst-ext-show-pill');
@@ -5868,6 +5972,11 @@ function bindTopDrawerEvents() {
     });
 
     document.getElementById('cqst-top-update-btn').addEventListener('click', triggerPluginOneClickUpdate);
+    document.getElementById('cqst-top-banner-update-btn').addEventListener('click', triggerPluginOneClickUpdate);
+    document.getElementById('cqst-top-banner-dismiss-btn').addEventListener('click', () => {
+        dismissedUpdateBannerVer = state.updateInfo?.remoteVersion || 'new';
+        renderUpdateNoticeUI();
+    });
     document.getElementById('cqst-top-theme-btn').addEventListener('click', toggleThemeMode);
     document.getElementById('cqst-top-sync-btn').addEventListener('click', handleSyncCurrentAction);
 
@@ -6727,6 +6836,17 @@ function initExtensionCore() {
         setTimeout(() => {
             checkPluginUpdate({ manual: false }).catch(() => {});
         }, 2500);
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                maybeAutoCheckPluginUpdate(5 * 60 * 1000);
+            }
+        });
+        setInterval(() => {
+            if (document.visibilityState === 'visible') {
+                maybeAutoCheckPluginUpdate(15 * 60 * 1000);
+            }
+        }, 15 * 60 * 1000);
     })();
     return initPromise;
 }
