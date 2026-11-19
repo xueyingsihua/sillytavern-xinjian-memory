@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.7';
+const PLUGIN_VERSION = '1.0.8';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -207,6 +207,7 @@ const state = {
     activePanoramaTab: 'archive',
     pendingDrafts: null,
     settingsProviderDrafts: null,
+    settingsDirty: false,
     initialized: false
 };
 
@@ -367,6 +368,9 @@ function showToast(title, message = '', type = 'ok', duration = 3200) {
     if (!wrap) {
         wrap = document.createElement('div');
         wrap.id = 'cqst-toast-wrap';
+        ['click', 'mousedown', 'pointerdown', 'touchstart'].forEach(evt => {
+            wrap.addEventListener(evt, e => e.stopPropagation());
+        });
         document.body.appendChild(wrap);
     }
     const toast = document.createElement('div');
@@ -375,7 +379,13 @@ function showToast(title, message = '', type = 'ok', duration = 3200) {
         <div class="cqst-toast-title">${escapeHtml(title)}</div>
         ${message ? `<div class="cqst-toast-msg">${escapeHtml(message)}</div>` : ''}
     `;
-    toast.addEventListener('click', () => toast.remove());
+    ['mousedown', 'pointerdown', 'touchstart'].forEach(evt => {
+        toast.addEventListener(evt, e => e.stopPropagation());
+    });
+    toast.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toast.remove();
+    });
     wrap.appendChild(toast);
     setTimeout(() => {
         if (toast.parentNode) {
@@ -3220,7 +3230,10 @@ function buildTopDrawerContentHTML() {
                         <div class="cqst-form-group">
                             <label class="cqst-form-label">
                                 <span>2A. AI 摘要提炼接口 (Summary)</span>
-                                <button type="button" class="cqst-link-btn" id="cqst-btn-fetch-chat">🔄 拉取模型</button>
+                                <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                    <button type="button" class="cqst-link-btn" id="cqst-btn-test-chat" title="使用当前页面填写的接口、Key 与模型发送极简测试消息，立即验证是否可用">🧪 测试消息</button>
+                                    <button type="button" class="cqst-link-btn" id="cqst-btn-fetch-chat">🔄 拉取模型</button>
+                                </span>
                             </label>
                             <select id="cqst-cfg-api-provider" class="cqst-select">
                                 <option value="gemini">✨ Google Gemini (官方 / 反代)</option>
@@ -3252,13 +3265,17 @@ function buildTopDrawerContentHTML() {
                                 </div>
                             </div>
                         </div>
+                        <div class="cqst-test-result" id="cqst-cfg-chat-test-result" style="display:none;"></div>
 
                         <hr class="cqst-divider">
 
                         <div class="cqst-form-group">
                             <label class="cqst-form-label">
                                 <span>2B. 向量与重排接口 (Embedding &amp; Rerank)</span>
-                                <button type="button" class="cqst-link-btn" id="cqst-btn-fetch-embed">🔄 拉取向量模型</button>
+                                <span style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                    <button type="button" class="cqst-link-btn" id="cqst-btn-test-embed" title="使用当前页面填写的向量接口、Key 与模型测算一条测试向量">🧪 测试向量</button>
+                                    <button type="button" class="cqst-link-btn" id="cqst-btn-fetch-embed">🔄 拉取向量模型</button>
+                                </span>
                             </label>
                             <select id="cqst-cfg-embed-provider" class="cqst-select">
                                 <option value="same">🔗 与上方总结接口共用</option>
@@ -3297,6 +3314,7 @@ function buildTopDrawerContentHTML() {
                                 </label>
                             </div>
                         </div>
+                        <div class="cqst-test-result" id="cqst-cfg-embed-test-result" style="display:none;"></div>
                     </div>
                 </div>
 
@@ -3399,7 +3417,7 @@ function mountSillyTavernHooks() {
             <div id="cqst-top-drawer-toggle" class="cqst-top-toggle" title="✉️ 信笺 | 外置记忆库全景页">
                 <div class="drawer-icon fa-solid fa-envelope-open-text fa-fw closedIcon"></div>
             </div>
-            <div id="cqst-top-drawer-content" class="drawer-content closedDrawer">
+            <div id="cqst-top-drawer-content" class="drawer-content cqst-drawer-closed">
                 ${buildTopDrawerContentHTML()}
             </div>
         `;
@@ -3410,7 +3428,7 @@ function mountSillyTavernHooks() {
             topHolder.appendChild(topDrawer);
         }
         bindTopDrawerEvents();
-        populateSettingsUI();
+        populateSettingsUI({ force: true });
         syncRenameInputsUI();
         renderAllUI();
         renderPendingDraftsUI();
@@ -3528,8 +3546,8 @@ function toggleTopDrawer(forceOpen = null) {
         content.style.display = '';
         content.style.height = '';
         content.style.overflow = '';
-        content.classList.remove('closedDrawer', 'resizing');
-        content.classList.add('openDrawer');
+        content.classList.remove('closedDrawer', 'openDrawer', 'resizing', 'cqst-drawer-closed');
+        content.classList.add('cqst-drawer-open');
         if (icon) {
             icon.classList.remove('closedIcon');
             icon.classList.add('openIcon');
@@ -3539,8 +3557,8 @@ function toggleTopDrawer(forceOpen = null) {
         renderAllUI();
     } else {
         state.topDrawerOpen = false;
-        content.classList.remove('openDrawer', 'resizing');
-        content.classList.add('closedDrawer');
+        content.classList.remove('openDrawer', 'closedDrawer', 'resizing', 'cqst-drawer-open');
+        content.classList.add('cqst-drawer-closed');
         content.style.display = '';
         content.style.height = '';
         content.style.overflow = '';
@@ -4972,8 +4990,14 @@ function toggleSettingsConditionalBoxes() {
     }
 }
 
-function populateSettingsUI() {
+function populateSettingsUI({ force = false } = {}) {
     if (!document.getElementById('cqst-cfg-storage-mode')) return;
+    if (state.settingsDirty && !force) {
+        const curBranchLabel = document.getElementById('cqst-cfg-cur-branch-label');
+        if (curBranchLabel) curBranchLabel.textContent = state.currentCompartment;
+        return;
+    }
+
     document.getElementById('cqst-cfg-storage-mode').value = state.config.storageMode || 'local';
     document.getElementById('cqst-cfg-github-dir-mode').value = state.config.githubDirMode || 'isolated';
     document.getElementById('cqst-cfg-github-pat').value = state.config.githubPat || '';
@@ -5025,6 +5049,9 @@ function populateSettingsUI() {
 
     populateSettingsModelSelects();
     toggleSettingsConditionalBoxes();
+    state.settingsDirty = false;
+    setInlineTestResult('cqst-cfg-chat-test-result', '', '');
+    setInlineTestResult('cqst-cfg-embed-test-result', '', '');
 }
 
 function openSliceModal(slice = null) {
@@ -5199,6 +5226,256 @@ async function fetchModelsFor(target) {
     showToast('模型拉取成功', isEmbed ? `向量 ${embedModels.length} 个 / 重排 ${rerankModels.length} 个` : `总结模型 ${chatModels.length} 个`);
 }
 
+function formatHttpErrorHint(status) {
+    if (status === 502 || status === 503 || status === 504) {
+        return '（服务端过载或所选模型渠道暂不可用，建议换一个模型再试）';
+    }
+    if (status === 401 || status === 403) {
+        return '（Key 无效、余额不足或无该模型权限）';
+    }
+    if (status === 404) {
+        return '（接口路径不对或该模型名不存在）';
+    }
+    if (status === 429) {
+        return '（触发限流或额度耗尽）';
+    }
+    return '';
+}
+
+function setInlineTestResult(boxId, status = '', text = '') {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    if (!text) {
+        box.style.display = 'none';
+        box.className = 'cqst-test-result';
+        box.textContent = '';
+        return;
+    }
+    box.style.display = 'block';
+    box.className = `cqst-test-result${status ? ` ${status}` : ''}`;
+    box.textContent = text;
+}
+
+let chatTestAbort = null;
+let embedTestAbort = null;
+
+async function testChatConnectionFromUI() {
+    const btn = document.getElementById('cqst-btn-test-chat');
+    if (chatTestAbort) {
+        try { chatTestAbort.abort(); } catch (e) {}
+        return;
+    }
+
+    const provider = document.getElementById('cqst-cfg-api-provider')?.value || 'gemini';
+    const rawKey = document.getElementById('cqst-cfg-chat-key')?.value.trim() || '';
+    const rawBase = document.getElementById('cqst-cfg-chat-base')?.value.trim() || '';
+    const customModel = document.getElementById('cqst-cfg-chat-model-custom')?.value.trim() || '';
+    const selectModel = document.getElementById('cqst-cfg-chat-model')?.value || '';
+
+    if (provider !== 'st_current' && !rawKey) {
+        const msg = '❌ 请先填写当前接口的 API Key';
+        setInlineTestResult('cqst-cfg-chat-test-result', 'err', msg);
+        showToast('请先填写 API Key', '填入 Key 后再点测试消息', 'warn');
+        return;
+    }
+
+    const resolved = resolveApiEndpoint(provider, rawKey, rawBase);
+    const defaultModel = PROVIDER_DEFAULTS[resolved.provider]?.chatModel || 'gpt-4o-mini';
+    const rawPicked = customModel || selectModel || '';
+    const model = resolved.useOpenAI
+        ? ((!rawPicked || rawPicked.startsWith('gemini-')) ? defaultModel : rawPicked)
+        : (rawPicked || 'gemini-2.5-flash');
+    const modelLabel = provider === 'st_current' ? '酒馆当前主 API' : `${provider} · ${model}`;
+
+    chatTestAbort = new AbortController();
+    const signal = chatTestAbort.signal;
+    const t0 = performance.now();
+    if (btn) btn.textContent = '⏳ 点此取消';
+    setInlineTestResult('cqst-cfg-chat-test-result', 'pending', `⏳ 正在向 [${modelLabel}] 发送测试消息...`);
+
+    try {
+        let replyText = '';
+        if (provider === 'st_current') {
+            const ctx = getSTContext();
+            if (typeof ctx?.generateQuietPrompt !== 'function') {
+                throw new Error('当前酒馆版本不支持 generateQuietPrompt，请改用独立接口');
+            }
+            const prompt = '连接测试：请仅回复 OK 两个字母。';
+            const fnSrc = Function.prototype.toString.call(ctx.generateQuietPrompt);
+            const usesOptionsObj = /^\s*(async\s+)?\w*\s*\(\s*\{/.test(fnSrc);
+            const quietCall = usesOptionsObj
+                ? ctx.generateQuietPrompt({ quietPrompt: prompt, skipWIAN: true })
+                : ctx.generateQuietPrompt(prompt, false, true);
+            replyText = String(await raceWithSignalAndTimeout(quietCall, { timeoutMs: 30000, signal, label: '酒馆主 API 测试' }) || '');
+        } else if (resolved.useOpenAI) {
+            const res = await fetchWithTimeout(`${resolved.base}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${resolved.key}`
+                },
+                body: JSON.stringify({
+                    model,
+                    messages: [{ role: 'user', content: '请仅回复 OK' }],
+                    max_tokens: 128,
+                    temperature: 0
+                })
+            }, { timeoutMs: 30000, signal, label: '总结测试消息' });
+            if (!res.ok) {
+                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+            }
+            const data = await res.json();
+            const msg = data.choices?.[0]?.message;
+            replyText = String(msg?.content || msg?.reasoning_content || '');
+        } else {
+            const res = await fetchWithTimeout(`${resolved.base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(resolved.key)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ role: 'user', parts: [{ text: '请仅回复 OK' }] }],
+                    safetySettings: [
+                        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+                        { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' }
+                    ]
+                })
+            }, { timeoutMs: 30000, signal, label: 'Gemini 测试消息' });
+            if (!res.ok) {
+                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+            }
+            const data = await res.json();
+            replyText = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+        }
+
+        const cleanReply = replyText.replace(/\s+/g, ' ').trim();
+        if (!cleanReply) {
+            throw new Error('接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文');
+        }
+        const sec = ((performance.now() - t0) / 1000).toFixed(1);
+        const snippet = cleanReply.length > 60 ? `${cleanReply.slice(0, 60)}...` : cleanReply;
+        setInlineTestResult('cqst-cfg-chat-test-result', 'ok', `✅ 测试通过（${sec}s · ${modelLabel}）· 回复：「${snippet}」`);
+        showToast('总结接口可用', `${modelLabel} 响应正常 (${sec}s)`, 'ok');
+    } catch (err) {
+        if (isAbortError(err)) {
+            setInlineTestResult('cqst-cfg-chat-test-result', '', '');
+            showToast('已取消测试', '', 'warn');
+            return;
+        }
+        const sec = ((performance.now() - t0) / 1000).toFixed(1);
+        const errMsg = err.message || String(err);
+        setInlineTestResult('cqst-cfg-chat-test-result', 'err', `❌ 测试失败（${sec}s · ${modelLabel}）：${errMsg}`);
+        showToast('总结测试未通过', errMsg, 'err', 5200);
+    } finally {
+        chatTestAbort = null;
+        if (btn) btn.textContent = '🧪 测试消息';
+    }
+}
+
+async function testEmbedConnectionFromUI() {
+    const btn = document.getElementById('cqst-btn-test-embed');
+    if (embedTestAbort) {
+        try { embedTestAbort.abort(); } catch (e) {}
+        return;
+    }
+
+    const chatProv = document.getElementById('cqst-cfg-api-provider')?.value || 'gemini';
+    const embProv = document.getElementById('cqst-cfg-embed-provider')?.value || 'same';
+
+    if (embProv === 'local' || (embProv === 'same' && chatProv === 'st_current')) {
+        const msg = '✅ 当前使用纯本地 128 维特征向量（无需 Key，离线可用）';
+        setInlineTestResult('cqst-cfg-embed-test-result', 'ok', msg);
+        showToast('本地向量可用', '无需配置在线向量接口', 'info');
+        return;
+    }
+
+    const effProv = embProv === 'same' ? chatProv : embProv;
+    const rawKey = (embProv === 'same'
+        ? document.getElementById('cqst-cfg-chat-key')?.value.trim()
+        : document.getElementById('cqst-cfg-embed-key')?.value.trim()) || '';
+    const rawBase = (embProv === 'same'
+        ? document.getElementById('cqst-cfg-chat-base')?.value.trim()
+        : document.getElementById('cqst-cfg-embed-base')?.value.trim()) || '';
+    const customModel = document.getElementById('cqst-cfg-embed-model-custom')?.value.trim() || '';
+    const selectModel = document.getElementById('cqst-cfg-embed-model')?.value || '';
+
+    if (!rawKey) {
+        const msg = '❌ 请先填写对应的向量 API Key';
+        setInlineTestResult('cqst-cfg-embed-test-result', 'err', msg);
+        showToast('请先填写向量 Key', '填入 Key 后再测试向量', 'warn');
+        return;
+    }
+
+    const resolved = resolveApiEndpoint(effProv, rawKey, rawBase);
+    const defaultEmb = PROVIDER_DEFAULTS[resolved.provider]?.embedModel || 'BAAI/bge-m3';
+    const rawPicked = customModel || selectModel || '';
+    const model = resolved.useOpenAI
+        ? ((!rawPicked || rawPicked.includes('text-embedding-004') || rawPicked.includes('gemini-embedding')) ? defaultEmb : rawPicked)
+        : (rawPicked || 'text-embedding-004');
+    const modelLabel = `${effProv} · ${model}`;
+
+    embedTestAbort = new AbortController();
+    const signal = embedTestAbort.signal;
+    const t0 = performance.now();
+    if (btn) btn.textContent = '⏳ 点此取消';
+    setInlineTestResult('cqst-cfg-embed-test-result', 'pending', `⏳ 正在测试向量接口 [${modelLabel}]...`);
+
+    try {
+        let vec = null;
+        if (resolved.useOpenAI) {
+            const res = await fetchWithTimeout(`${resolved.base}/embeddings`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${resolved.key}`
+                },
+                body: JSON.stringify({ model, input: '记忆库向量连通性测试', encoding_format: 'float' })
+            }, { timeoutMs: 25000, signal, label: '向量接口测试' });
+            if (!res.ok) {
+                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+            }
+            const data = await res.json();
+            vec = data.data?.[0]?.embedding;
+        } else {
+            const res = await fetchWithTimeout(`${resolved.base}/v1beta/models/${model}:embedContent?key=${encodeURIComponent(resolved.key)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text: '记忆库向量连通性测试' }] } })
+            }, { timeoutMs: 25000, signal, label: 'Gemini 向量测试' });
+            if (!res.ok) {
+                const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+                throw new Error(`HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+            }
+            const data = await res.json();
+            vec = data.embedding?.values;
+        }
+
+        if (!Array.isArray(vec) || vec.length === 0) {
+            throw new Error('接口返回空向量数据');
+        }
+        const sec = ((performance.now() - t0) / 1000).toFixed(1);
+        setInlineTestResult('cqst-cfg-embed-test-result', 'ok', `✅ 向量测试通过（${sec}s · ${vec.length} 维 · ${modelLabel}）`);
+        showToast('向量接口可用', `${modelLabel} 返回 ${vec.length} 维向量 (${sec}s)`, 'ok');
+    } catch (err) {
+        if (isAbortError(err)) {
+            setInlineTestResult('cqst-cfg-embed-test-result', '', '');
+            showToast('已取消向量测试', '', 'warn');
+            return;
+        }
+        const sec = ((performance.now() - t0) / 1000).toFixed(1);
+        const errMsg = err.message || String(err);
+        setInlineTestResult('cqst-cfg-embed-test-result', 'err', `❌ 向量测试失败（${sec}s · ${modelLabel}）：${errMsg}`);
+        showToast('向量测试未通过', errMsg, 'err', 5200);
+    } finally {
+        embedTestAbort = null;
+        if (btn) btn.textContent = '🧪 测试向量';
+    }
+}
+
 async function handleSyncCurrentAction() {
     if (!isGithubModeActive()) {
         openPanoramaAt('settings');
@@ -5306,6 +5583,8 @@ function bindBaseUIEvents() {
         state.config.showFloatingPill = false;
         togglePanel(false);
         saveSettings();
+        const showPillChk = document.getElementById('cqst-cfg-show-pill');
+        if (showPillChk) showPillChk.checked = false;
         populateSettingsUI();
         renderAllUI();
         showToast('已隐藏悬浮球', '可点顶栏 ✉️ 打开全景页 → ⚙️ 配置与深度 中重新显示', 'info');
@@ -5939,6 +6218,18 @@ function bindTopDrawerEvents() {
     });
 
     // Tab 3: 存储、模型与深度配置
+    const settingsPane = document.getElementById('cqst-pane-settings');
+    if (settingsPane && !settingsPane.dataset.cqstDirtyBound) {
+        settingsPane.dataset.cqstDirtyBound = '1';
+        const markDirty = (e) => {
+            if (e.target && e.target.matches('input, select, textarea')) {
+                state.settingsDirty = true;
+            }
+        };
+        settingsPane.addEventListener('input', markDirty);
+        settingsPane.addEventListener('change', markDirty);
+    }
+
     document.getElementById('cqst-cfg-storage-mode').addEventListener('change', toggleSettingsConditionalBoxes);
     document.getElementById('cqst-cfg-api-provider').addEventListener('change', (e) => {
         const prev = e.target.dataset.prevProvider;
@@ -5946,6 +6237,7 @@ function bindTopDrawerEvents() {
         stashCurrentProviderInputs('chat', prev);
         e.target.dataset.prevProvider = next;
         applyProviderInputsToUI('chat', next);
+        setInlineTestResult('cqst-cfg-chat-test-result', '', '');
         toggleSettingsConditionalBoxes();
         populateSettingsModelSelects();
     });
@@ -5956,6 +6248,7 @@ function bindTopDrawerEvents() {
         stashCurrentProviderInputs('embed', prev);
         e.target.dataset.prevProvider = next;
         applyProviderInputsToUI('embed', next);
+        setInlineTestResult('cqst-cfg-embed-test-result', '', '');
         toggleSettingsConditionalBoxes();
         populateSettingsModelSelects();
     });
@@ -5969,6 +6262,9 @@ function bindTopDrawerEvents() {
             btn.textContent = showing ? '👁️' : '🙈';
         });
     });
+
+    document.getElementById('cqst-btn-test-chat').addEventListener('click', testChatConnectionFromUI);
+    document.getElementById('cqst-btn-test-embed').addEventListener('click', testEmbedConnectionFromUI);
 
     document.getElementById('cqst-btn-fetch-chat').addEventListener('click', async () => {
         const btn = document.getElementById('cqst-btn-fetch-chat');
@@ -6203,7 +6499,8 @@ function bindTopDrawerEvents() {
         if (!isGithubModeActive()) {
             applyLocalPersonas();
             saveSettings();
-            populateSettingsUI();
+            state.settingsDirty = false;
+            populateSettingsUI({ force: true });
             renderAllUI();
             showToast('配置已保存', `当前注入层级：${getInjectDepthLabel()} · 本地存储`);
             return;
@@ -6237,7 +6534,8 @@ function bindTopDrawerEvents() {
         } finally {
             hideLoading();
         }
-        populateSettingsUI();
+        state.settingsDirty = false;
+        populateSettingsUI({ force: true });
         renderAllUI();
     });
 }
@@ -6327,7 +6625,7 @@ function initExtensionCore() {
         state.isCustomBound = resolved.isCustom;
         await loadCompartment(resolved.name, { forceRemote: isGithubModeActive() });
         await syncRenameInputsUI();
-        populateSettingsUI();
+        populateSettingsUI({ force: !state.settingsDirty });
         renderAllUI();
 
         if (ctx?.eventSource && ctx?.event_types) {
