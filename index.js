@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.6';
+const PLUGIN_VERSION = '1.0.7';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -39,6 +39,63 @@ const PRESET_MODELS = {
         rerank: ['BAAI/bge-reranker-v2-m3']
     }
 };
+
+const PROVIDER_DEFAULTS = {
+    gemini: {
+        base: 'https://generativelanguage.googleapis.com',
+        chatModel: 'gemini-2.5-flash',
+        embedModel: 'text-embedding-004',
+        keyPlaceholder: 'Google Gemini API Key (AIzaSy...)',
+        basePlaceholder: 'https://generativelanguage.googleapis.com'
+    },
+    siliconflow: {
+        base: 'https://api.siliconflow.cn/v1',
+        chatModel: 'Qwen/Qwen2.5-7B-Instruct',
+        embedModel: 'BAAI/bge-m3',
+        keyPlaceholder: '硅基流动 API Key (sk-...)',
+        basePlaceholder: 'https://api.siliconflow.cn/v1'
+    },
+    openai: {
+        base: '',
+        chatModel: 'gpt-4o-mini',
+        embedModel: 'text-embedding-3-small',
+        keyPlaceholder: 'OpenAI 兼容反代 API Key (sk-...)',
+        basePlaceholder: 'https://your-proxy.example.com/v1'
+    }
+};
+
+function cloneDefaultChatProfiles() {
+    return {
+        gemini: { key: '', base: PROVIDER_DEFAULTS.gemini.base, model: PROVIDER_DEFAULTS.gemini.chatModel },
+        siliconflow: { key: '', base: PROVIDER_DEFAULTS.siliconflow.base, model: PROVIDER_DEFAULTS.siliconflow.chatModel },
+        openai: { key: '', base: PROVIDER_DEFAULTS.openai.base, model: PROVIDER_DEFAULTS.openai.chatModel }
+    };
+}
+
+function cloneDefaultEmbedProfiles() {
+    return {
+        siliconflow: { key: '', base: PROVIDER_DEFAULTS.siliconflow.base, model: PROVIDER_DEFAULTS.siliconflow.embedModel },
+        gemini: { key: '', base: PROVIDER_DEFAULTS.gemini.base, model: PROVIDER_DEFAULTS.gemini.embedModel },
+        openai: { key: '', base: PROVIDER_DEFAULTS.openai.base, model: PROVIDER_DEFAULTS.openai.embedModel }
+    };
+}
+
+function normalizeProviderProfiles(savedProfiles, isEmbed = false) {
+    const baseMap = isEmbed ? cloneDefaultEmbedProfiles() : cloneDefaultChatProfiles();
+    if (savedProfiles && typeof savedProfiles === 'object') {
+        Object.keys(baseMap).forEach(prov => {
+            const entry = savedProfiles[prov];
+            if (entry && typeof entry === 'object') {
+                baseMap[prov] = {
+                    key: typeof entry.key === 'string' ? entry.key : '',
+                    base: typeof entry.base === 'string' ? entry.base : baseMap[prov].base,
+                    model: typeof entry.model === 'string' && entry.model.trim() ? entry.model.trim() : baseMap[prov].model
+                };
+            }
+        });
+    }
+    return baseMap;
+}
 
 const DEFAULT_SCRAPE_PRESETS = [
     {
@@ -89,6 +146,8 @@ const DEFAULT_CONFIG = {
     embedKey: '',
     embedBase: 'https://api.siliconflow.cn/v1',
     embedModel: 'text-embedding-004',
+    chatProfiles: cloneDefaultChatProfiles(),
+    embedProfiles: cloneDefaultEmbedProfiles(),
     rerankEnabled: false,
     rerankModel: 'BAAI/bge-reranker-v2-m3',
     topK: 5,
@@ -147,6 +206,7 @@ const state = {
     topDrawerOpen: false,
     activePanoramaTab: 'archive',
     pendingDrafts: null,
+    settingsProviderDrafts: null,
     initialized: false
 };
 
@@ -662,6 +722,42 @@ function loadSettings() {
             if (effEmb === 'siliconflow' && (!state.config.embedModel || state.config.embedModel === 'text-embedding-004')) {
                 state.config.embedModel = 'BAAI/bge-m3';
             }
+            state.config.chatProfiles = normalizeProviderProfiles(saved.config.chatProfiles, false);
+            state.config.embedProfiles = normalizeProviderProfiles(saved.config.embedProfiles, true);
+
+            // 兼容旧版本（<=1.0.6）：首次升级时将单一字段迁移到当前选中的接口档案
+            if (!saved.config.chatProfiles && PROVIDER_DEFAULTS[state.config.apiProvider]) {
+                const p = state.config.apiProvider;
+                state.config.chatProfiles[p] = {
+                    key: state.config.geminiKey || '',
+                    base: state.config.geminiBase || PROVIDER_DEFAULTS[p].base,
+                    model: state.config.chatModel || PROVIDER_DEFAULTS[p].chatModel
+                };
+            }
+            if (!saved.config.embedProfiles && PROVIDER_DEFAULTS[state.config.embedProvider]) {
+                const ep = state.config.embedProvider;
+                const legacyKey = state.config.embedKey || (ep === state.config.apiProvider ? state.config.geminiKey : '');
+                state.config.embedProfiles[ep] = {
+                    key: legacyKey || '',
+                    base: state.config.embedBase || PROVIDER_DEFAULTS[ep].base,
+                    model: state.config.embedModel || PROVIDER_DEFAULTS[ep].embedModel
+                };
+            }
+            if (state.config.embedProfiles.siliconflow?.model === 'text-embedding-004') {
+                state.config.embedProfiles.siliconflow.model = 'BAAI/bge-m3';
+            }
+            if (PROVIDER_DEFAULTS[state.config.apiProvider]) {
+                const activeChatProf = state.config.chatProfiles[state.config.apiProvider];
+                state.config.geminiKey = activeChatProf.key || '';
+                state.config.geminiBase = activeChatProf.base || PROVIDER_DEFAULTS[state.config.apiProvider].base;
+                state.config.chatModel = activeChatProf.model || PROVIDER_DEFAULTS[state.config.apiProvider].chatModel;
+            }
+            if (PROVIDER_DEFAULTS[state.config.embedProvider]) {
+                const activeEmbProf = state.config.embedProfiles[state.config.embedProvider];
+                state.config.embedKey = activeEmbProf.key || '';
+                state.config.embedBase = activeEmbProf.base || PROVIDER_DEFAULTS[state.config.embedProvider].base;
+                state.config.embedModel = activeEmbProf.model || PROVIDER_DEFAULTS[state.config.embedProvider].embedModel;
+            }
             if (!Array.isArray(state.config.scrapePresets) || state.config.scrapePresets.length === 0) {
                 state.config.scrapePresets = cloneDefaultScrapePresets();
             } else {
@@ -706,6 +802,9 @@ function loadSettings() {
         if (saved.lastArchivedFloorMap && typeof saved.lastArchivedFloorMap === 'object' && !Array.isArray(saved.lastArchivedFloorMap)) {
             state.lastArchivedFloorMap = { ...saved.lastArchivedFloorMap };
         }
+    } else {
+        state.config.chatProfiles = cloneDefaultChatProfiles();
+        state.config.embedProfiles = cloneDefaultEmbedProfiles();
     }
 }
 
@@ -1402,7 +1501,11 @@ function resolveApiEndpoint(provider, rawKey, rawBase) {
 }
 
 function getChatApiConfig() {
-    return resolveApiEndpoint(state.config.apiProvider || 'gemini', state.config.geminiKey, state.config.geminiBase);
+    const prov = state.config.apiProvider || 'gemini';
+    const prof = state.config.chatProfiles?.[prov];
+    const key = (prof ? prof.key : state.config.geminiKey) || '';
+    const base = (prof ? prof.base : state.config.geminiBase) || '';
+    return resolveApiEndpoint(prov, key, base);
 }
 
 function getEmbedApiConfig() {
@@ -1414,7 +1517,10 @@ function getEmbedApiConfig() {
         }
         return getChatApiConfig();
     }
-    return resolveApiEndpoint(ep, state.config.embedKey || state.config.geminiKey, state.config.embedBase);
+    const prof = state.config.embedProfiles?.[ep];
+    const key = (prof ? prof.key : state.config.embedKey) || '';
+    const base = (prof ? prof.base : state.config.embedBase) || '';
+    return resolveApiEndpoint(ep, key, base);
 }
 
 function describeSummaryProvider() {
@@ -2863,114 +2969,95 @@ function buildTopDrawerContentHTML() {
         <!-- Tab 1: 记忆档案库 -->
         <div class="cqst-tab-pane active" id="cqst-pane-archive">
             <div class="cqst-panorama-grid">
-                <!-- 左列：抓取总结 + 深度层挂载唤醒 -->
-                <div style="display:flex;flex-direction:column;gap:12px;">
-                    <div class="cqst-card">
-                        <div class="cqst-row-wrap">
-                            <span style="font-size:12.5px;font-weight:700;">📥 对话抓取与 AI 总结归档</span>
-                            <div style="display:flex;align-items:center;gap:5px;">
-                                <select id="cqst-top-scrape-mode" class="cqst-select compact-h" style="width:auto;">
-                                    <option value="unarchived">✨ 未归档新楼层</option>
-                                    <option value="recent3">最近 3 轮 (6层 · 推荐)</option>
-                                    <option value="recent5">最近 5 轮 (10层)</option>
-                                    <option value="recent10">最近 10 轮 (20层)</option>
-                                    <option value="range">指定楼层范围</option>
-                                </select>
-                                <button type="button" class="cqst-btn sm" id="cqst-top-btn-scrape">🔍 抓取</button>
-                            </div>
-                        </div>
-                        <div class="cqst-row" style="gap:6px;">
-                            <select id="cqst-scrape-preset-select" class="cqst-select compact-h" style="flex:1;" title="选择当前使用的抓取与正文清洗规则预设"></select>
-                            <button type="button" class="cqst-btn sm" id="cqst-btn-toggle-scrape-cfg" style="flex-shrink:0;">✂️ 清洗规则</button>
-                        </div>
-                        <div id="cqst-scrape-config-box" class="cqst-scrape-config-box">
-                            <div class="cqst-row-wrap">
-                                <span style="font-size:11.5px;font-weight:700;color:var(--cqst-text-strong);">📐 抓取与清洗预设模板</span>
-                                <div style="display:flex;gap:4px;flex-wrap:wrap;">
-                                    <button type="button" class="cqst-btn sm primary" id="cqst-btn-save-scrape-preset">💾 保存到当前</button>
-                                    <button type="button" class="cqst-btn sm" id="cqst-btn-saveas-scrape-preset">➕ 另存</button>
-                                    <button type="button" class="cqst-btn sm" id="cqst-btn-rename-scrape-preset">✏️ 改名</button>
-                                    <button type="button" class="cqst-btn sm danger" id="cqst-btn-del-scrape-preset">🗑️</button>
-                                </div>
-                            </div>
-                            <div class="cqst-form-group">
-                                <label class="cqst-form-label">正文提取标签（逗号分隔，默认 <code>content</code>；留空则抓全文）</label>
-                                <input type="text" id="cqst-scrape-extract-tags" class="cqst-input compact-h" placeholder="例如：content, 正文, story">
-                                <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
-                                    <input type="checkbox" class="cqst-checkbox" id="cqst-scrape-fallback-notag">
-                                    <span>消息未含以上标签时保留原文（防止漏抓玩家发言）</span>
-                                </label>
-                            </div>
-                            <div class="cqst-form-group">
-                                <label class="cqst-form-label">强制剔除组件/思维链标签（逗号分隔）</label>
-                                <input type="text" id="cqst-scrape-strip-tags" class="cqst-input compact-h" placeholder="例如：think, thinking, status, 状态栏, small_theater, 小剧场">
-                            </div>
-                            <div class="cqst-form-group">
-                                <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-weight:700;color:var(--cqst-text-strong);">
-                                    <input type="checkbox" class="cqst-checkbox" id="cqst-scrape-clean-comments">
-                                    <span>🧹 自动清洗正文内的 HTML 注释自检块 (&lt;!-- ... --&gt;)</span>
-                                </label>
-                                <input type="text" id="cqst-scrape-keep-comments" class="cqst-input compact-h" placeholder="🛡️ 保留注释关键词白名单（直接填文本即可，无需写 <!-- -->，如：伏笔, 备注）">
-                                <span class="cqst-form-hint">示例：直接填注释里的关键词 <code>伏笔, 重要备注</code>（不用加 <code>&lt;!-- --&gt;</code>）；像 <code>&lt;!-- 文中自检... --&gt;</code> 这类自检注释会被洗掉，而含「伏笔」的注释会保留。</span>
-                            </div>
-                        </div>
-                        <div id="cqst-top-floor-box" class="cqst-row" style="display:none;gap:6px;">
-                            <input type="number" id="cqst-top-floor-start" class="cqst-input compact-h" min="0" value="0" placeholder="起始楼层">
-                            <span style="font-size:11.5px;">~</span>
-                            <input type="number" id="cqst-top-floor-end" class="cqst-input compact-h" min="0" value="20" placeholder="结束楼层">
-                        </div>
-                        <textarea id="cqst-top-archive-preview" class="cqst-textarea" rows="4" placeholder="点击「🔍 抓取」读取酒馆对话，或粘贴文本（可编辑后再归档）..."></textarea>
-                        <div class="cqst-char-counter" id="cqst-top-archive-charcount">建议单次抓取 3~5 轮（约 2000~6000 字），速度更快、细节更不易漏</div>
-                        <div class="cqst-row-wrap">
-                            <span style="font-size:11.5px;color:var(--cqst-text-light);font-weight:700;">点选 #标签（盖印 𝔖）：</span>
-                            <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
-                                <input type="text" id="cqst-top-quick-tag-input" class="cqst-input compact-h" style="width:118px;" placeholder="+ 快速加标签(回车)">
-                                <button type="button" class="cqst-btn sm" id="cqst-top-quick-tag-btn" title="快速添加并选中标签">➕</button>
-                                <button type="button" class="cqst-link-btn" id="cqst-top-btn-tags">🏷️ 管理标签池</button>
-                            </div>
-                        </div>
-                        <div class="cqst-tag-list" id="cqst-top-tag-container"></div>
-                        <div class="cqst-row-wrap">
-                            <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
-                                <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-aisum" checked>
-                                <span>AI 提炼摘要</span>
-                            </label>
-                            <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;" title="勾选后才会每满 N 轮自动归档；不勾选则只手动归档、绝不自动存">
-                                <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-autoarchive">
-                                <span>开启自动存（每 <strong id="cqst-top-lbl-autoturns">5</strong> 轮）</span>
-                            </label>
-                            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                                <button type="button" class="cqst-btn bot" id="cqst-top-btn-summarize" title="仅执行第 1 步 AI 总结，生成可编辑草稿后再手动点「确认存入」">📝 先总结预览</button>
-                                <button type="button" class="cqst-btn primary" id="cqst-top-btn-archive" title="一步完成 AI 总结、计算向量并存入记忆库">⚡ 一键归档</button>
-                            </div>
-                        </div>
-                        <div class="cqst-draft-box" id="cqst-top-draft-box" style="display:none;">
-                            <div class="cqst-draft-header">
-                                <span class="cqst-draft-meta" id="cqst-top-draft-meta">📋 待存入草稿</span>
-                                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                                    <button type="button" class="cqst-btn sm" id="cqst-top-btn-discard-drafts">🗑️ 放弃草稿</button>
-                                    <button type="button" class="cqst-btn sm primary" id="cqst-top-btn-commit-drafts">💾 确认存入记忆库</button>
-                                </div>
-                            </div>
-                            <div class="cqst-draft-list" id="cqst-top-draft-list"></div>
+                <!-- 左列：抓取总结 -->
+                <div class="cqst-card">
+                    <div class="cqst-row-wrap">
+                        <span style="font-size:12.5px;font-weight:700;">📥 对话抓取与 AI 总结归档</span>
+                        <div style="display:flex;align-items:center;gap:5px;">
+                            <select id="cqst-top-scrape-mode" class="cqst-select compact-h" style="width:auto;">
+                                <option value="unarchived">✨ 未归档新楼层</option>
+                                <option value="recent3">最近 3 轮 (6层 · 推荐)</option>
+                                <option value="recent5">最近 5 轮 (10层)</option>
+                                <option value="recent10">最近 10 轮 (20层)</option>
+                                <option value="range">指定楼层范围</option>
+                            </select>
+                            <button type="button" class="cqst-btn sm" id="cqst-top-btn-scrape">🔍 抓取</button>
                         </div>
                     </div>
-
-                    <div class="cqst-card bot-accent">
+                    <div class="cqst-row" style="gap:6px;">
+                        <select id="cqst-scrape-preset-select" class="cqst-select compact-h" style="flex:1;" title="选择当前使用的抓取与正文清洗规则预设"></select>
+                        <button type="button" class="cqst-btn sm" id="cqst-btn-toggle-scrape-cfg" style="flex-shrink:0;">✂️ 清洗规则</button>
+                    </div>
+                    <div id="cqst-scrape-config-box" class="cqst-scrape-config-box">
                         <div class="cqst-row-wrap">
-                            <label style="font-size:12.5px;font-weight:700;color:var(--cqst-bot-text);display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
-                                <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-autoinject">
-                                <span>🔮 发消息时自动扫最近 <strong id="cqst-top-lbl-scanfloors">4</strong> 楼正文唤醒并注入深度层</span>
+                            <span style="font-size:11.5px;font-weight:700;color:var(--cqst-text-strong);">📐 抓取与清洗预设模板</span>
+                            <div style="display:flex;gap:4px;flex-wrap:wrap;">
+                                <button type="button" class="cqst-btn sm primary" id="cqst-btn-save-scrape-preset">💾 保存到当前</button>
+                                <button type="button" class="cqst-btn sm" id="cqst-btn-saveas-scrape-preset">➕ 另存</button>
+                                <button type="button" class="cqst-btn sm" id="cqst-btn-rename-scrape-preset">✏️ 改名</button>
+                                <button type="button" class="cqst-btn sm danger" id="cqst-btn-del-scrape-preset">🗑️</button>
+                            </div>
+                        </div>
+                        <div class="cqst-form-group">
+                            <label class="cqst-form-label">正文提取标签（逗号分隔，默认 <code>content</code>；留空则抓全文）</label>
+                            <input type="text" id="cqst-scrape-extract-tags" class="cqst-input compact-h" placeholder="例如：content, 正文, story">
+                            <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
+                                <input type="checkbox" class="cqst-checkbox" id="cqst-scrape-fallback-notag">
+                                <span>消息未含以上标签时保留原文（防止漏抓玩家发言）</span>
                             </label>
-                            <select id="cqst-top-tag-filter" class="cqst-select compact-h" style="width:auto;max-width:140px;"></select>
                         </div>
-                        <div class="cqst-row">
-                            <input type="text" id="cqst-top-recall-input" class="cqst-input" placeholder="半自动唤醒挂载：填关键词搜指定记忆，留空直接点按钮自动扫近期楼层（不写对话框）...">
-                            <button type="button" class="cqst-btn bot" id="cqst-top-btn-recall-mount" style="flex-shrink:0;" title="半自动模式：填写关键词则精准检索，留空则自动扫描最近 N 楼正文匹配并提前挂载到深度层">🔮 唤醒挂载</button>
-                            <button type="button" class="cqst-btn" id="cqst-top-btn-recall-clear" style="flex-shrink:0;" title="清除当前挂载的记忆提示词">✕ 清除</button>
+                        <div class="cqst-form-group">
+                            <label class="cqst-form-label">强制剔除组件/思维链标签（逗号分隔）</label>
+                            <input type="text" id="cqst-scrape-strip-tags" class="cqst-input compact-h" placeholder="例如：think, thinking, status, 状态栏, small_theater, 小剧场">
                         </div>
-                        <div class="cqst-form-hint" id="cqst-top-mount-status">当前状态：发消息自动扫最近 4 楼注入；下方算半自动唤醒挂载，留空也能直接点按钮自动扫楼 pre-mount。</div>
-                        <div class="cqst-recall-preview" id="cqst-top-recall-preview"></div>
+                        <div class="cqst-form-group">
+                            <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-weight:700;color:var(--cqst-text-strong);">
+                                <input type="checkbox" class="cqst-checkbox" id="cqst-scrape-clean-comments">
+                                <span>🧹 自动清洗正文内的 HTML 注释自检块 (&lt;!-- ... --&gt;)</span>
+                            </label>
+                            <input type="text" id="cqst-scrape-keep-comments" class="cqst-input compact-h" placeholder="🛡️ 保留注释关键词白名单（直接填文本即可，无需写 <!-- -->，如：伏笔, 备注）">
+                            <span class="cqst-form-hint">示例：直接填注释里的关键词 <code>伏笔, 重要备注</code>（不用加 <code>&lt;!-- --&gt;</code>）；像 <code>&lt;!-- 文中自检... --&gt;</code> 这类自检注释会被洗掉，而含「伏笔」的注释会保留。</span>
+                        </div>
+                    </div>
+                    <div id="cqst-top-floor-box" class="cqst-row" style="display:none;gap:6px;">
+                        <input type="number" id="cqst-top-floor-start" class="cqst-input compact-h" min="0" value="0" placeholder="起始楼层">
+                        <span style="font-size:11.5px;">~</span>
+                        <input type="number" id="cqst-top-floor-end" class="cqst-input compact-h" min="0" value="20" placeholder="结束楼层">
+                    </div>
+                    <textarea id="cqst-top-archive-preview" class="cqst-textarea" rows="4" placeholder="点击「🔍 抓取」读取酒馆对话，或粘贴文本（可编辑后再归档）..."></textarea>
+                    <div class="cqst-char-counter" id="cqst-top-archive-charcount">建议单次抓取 3~5 轮（约 2000~6000 字），速度更快、细节更不易漏</div>
+                    <div class="cqst-row-wrap">
+                        <span style="font-size:11.5px;color:var(--cqst-text-light);font-weight:700;">点选 #标签（盖印 𝔖）：</span>
+                        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
+                            <input type="text" id="cqst-top-quick-tag-input" class="cqst-input compact-h" style="width:118px;" placeholder="+ 快速加标签(回车)">
+                            <button type="button" class="cqst-btn sm" id="cqst-top-quick-tag-btn" title="快速添加并选中标签">➕</button>
+                            <button type="button" class="cqst-link-btn" id="cqst-top-btn-tags">🏷️ 管理标签池</button>
+                        </div>
+                    </div>
+                    <div class="cqst-tag-list" id="cqst-top-tag-container"></div>
+                    <div class="cqst-row-wrap">
+                        <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
+                            <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-aisum" checked>
+                            <span>AI 提炼摘要</span>
+                        </label>
+                        <label style="font-size:11.5px;display:inline-flex;align-items:center;gap:5px;cursor:pointer;" title="勾选后才会每满 N 轮自动归档；不勾选则只手动归档、绝不自动存">
+                            <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-autoarchive">
+                            <span>开启自动存（每 <strong id="cqst-top-lbl-autoturns">5</strong> 轮）</span>
+                        </label>
+                        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                            <button type="button" class="cqst-btn bot" id="cqst-top-btn-summarize" title="仅执行第 1 步 AI 总结，生成可编辑草稿后再手动点「确认存入」">📝 先总结预览</button>
+                            <button type="button" class="cqst-btn primary" id="cqst-top-btn-archive" title="一步完成 AI 总结、计算向量并存入记忆库">⚡ 一键归档</button>
+                        </div>
+                    </div>
+                    <div class="cqst-draft-box" id="cqst-top-draft-box" style="display:none;">
+                        <div class="cqst-draft-header">
+                            <span class="cqst-draft-meta" id="cqst-top-draft-meta">📋 待存入草稿</span>
+                            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                                <button type="button" class="cqst-btn sm" id="cqst-top-btn-discard-drafts">🗑️ 放弃草稿</button>
+                                <button type="button" class="cqst-btn sm primary" id="cqst-top-btn-commit-drafts">💾 确认存入记忆库</button>
+                            </div>
+                        </div>
+                        <div class="cqst-draft-list" id="cqst-top-draft-list"></div>
                     </div>
                 </div>
 
@@ -3002,6 +3089,24 @@ function buildTopDrawerContentHTML() {
                     <div class="cqst-archive-scroll" id="cqst-drawer-list"></div>
                     <div class="cqst-pagination" id="cqst-drawer-pagination"></div>
                 </div>
+            </div>
+
+            <!-- 底部：深度层唤醒挂载区（放在最下面，手机端不必先滑过这里再看档案卡片） -->
+            <div class="cqst-card bot-accent">
+                <div class="cqst-row-wrap">
+                    <label style="font-size:12.5px;font-weight:700;color:var(--cqst-bot-text);display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+                        <input type="checkbox" class="cqst-checkbox" id="cqst-top-chk-autoinject">
+                        <span>🔮 发消息时自动扫最近 <strong id="cqst-top-lbl-scanfloors">4</strong> 楼正文唤醒并注入深度层</span>
+                    </label>
+                    <select id="cqst-top-tag-filter" class="cqst-select compact-h" style="width:auto;max-width:140px;"></select>
+                </div>
+                <div class="cqst-row">
+                    <input type="text" id="cqst-top-recall-input" class="cqst-input" placeholder="半自动唤醒挂载：填关键词搜指定记忆，留空直接点按钮自动扫近期楼层（不写对话框）...">
+                    <button type="button" class="cqst-btn bot" id="cqst-top-btn-recall-mount" style="flex-shrink:0;" title="半自动模式：填写关键词则精准检索，留空则自动扫描最近 N 楼正文匹配并提前挂载到深度层">🔮 唤醒挂载</button>
+                    <button type="button" class="cqst-btn" id="cqst-top-btn-recall-clear" style="flex-shrink:0;" title="清除当前挂载的记忆提示词">✕ 清除</button>
+                </div>
+                <div class="cqst-form-hint" id="cqst-top-mount-status">当前状态：发消息自动扫最近 4 楼注入；下方算半自动唤醒挂载，留空也能直接点按钮自动扫楼 pre-mount。</div>
+                <div class="cqst-recall-preview" id="cqst-top-recall-preview"></div>
             </div>
         </div>
 
@@ -3042,20 +3147,6 @@ function buildTopDrawerContentHTML() {
                             <button type="button" class="cqst-btn primary" id="cqst-btn-create-branch">➕ 新建</button>
                         </div>
                     </div>
-
-                    <div id="cqst-clone-official-wrap" class="cqst-card bot-accent" style="display:none;">
-                        <div class="cqst-row">
-                            <span style="font-size:12px;font-weight:700;">📥 从仓库根目录 (<code>branches/</code>) 单向克隆到酒馆</span>
-                            <button type="button" class="cqst-link-btn" id="cqst-btn-scan-official">🔍 读取根目录隔间</button>
-                        </div>
-                        <div class="cqst-row">
-                            <select id="cqst-official-branch-select" class="cqst-select">
-                                <option value="">点击右上角「读取根目录隔间」扫描...</option>
-                            </select>
-                            <button type="button" class="cqst-btn sm bot" id="cqst-btn-clone-official" style="flex-shrink:0;">📥 克隆到酒馆</button>
-                        </div>
-                        <span class="cqst-form-hint">若同仓库根目录 <code>branches/</code> 存有其他记忆数据，可仅单向复制到 <code>tavern/branches/</code>，绝不修改或覆盖原文件。</span>
-                    </div>
                 </div>
 
                 <div class="cqst-card">
@@ -3065,6 +3156,21 @@ function buildTopDrawerContentHTML() {
                     </div>
                     <div id="cqst-branch-list-container" class="cqst-archive-scroll"></div>
                 </div>
+            </div>
+
+            <!-- 底部：低频仓库根目录单向克隆区（放在最下面，不占手机首屏空间） -->
+            <div id="cqst-clone-official-wrap" class="cqst-card bot-accent" style="display:none;">
+                <div class="cqst-row">
+                    <span style="font-size:12px;font-weight:700;">📥 从仓库根目录 (<code>branches/</code>) 单向克隆到酒馆</span>
+                    <button type="button" class="cqst-link-btn" id="cqst-btn-scan-official">🔍 读取根目录隔间</button>
+                </div>
+                <div class="cqst-row">
+                    <select id="cqst-official-branch-select" class="cqst-select">
+                        <option value="">点击右上角「读取根目录隔间」扫描...</option>
+                    </select>
+                    <button type="button" class="cqst-btn sm bot" id="cqst-btn-clone-official" style="flex-shrink:0;">📥 克隆到酒馆</button>
+                </div>
+                <span class="cqst-form-hint">若同仓库根目录 <code>branches/</code> 存有其他记忆数据，可仅单向复制到 <code>tavern/branches/</code>，绝不修改或覆盖原文件。</span>
             </div>
         </div>
 
@@ -3091,7 +3197,10 @@ function buildTopDrawerContentHTML() {
                             </div>
                             <div class="cqst-form-group">
                                 <label class="cqst-form-label">GitHub Personal Access Token (PAT)</label>
-                                <input type="password" id="cqst-cfg-github-pat" class="cqst-input" placeholder="ghp_... 或 github_pat_...">
+                                <div class="cqst-row" style="gap:5px;">
+                                    <input type="password" id="cqst-cfg-github-pat" class="cqst-input" placeholder="ghp_... 或 github_pat_...">
+                                    <button type="button" class="cqst-btn sm icon-only cqst-toggle-secret" data-secret-target="cqst-cfg-github-pat" title="显示 / 隐藏 PAT">👁️</button>
+                                </div>
                             </div>
                             <div class="cqst-form-group">
                                 <label class="cqst-form-label">
@@ -3121,7 +3230,16 @@ function buildTopDrawerContentHTML() {
                             </select>
                         </div>
                         <div id="cqst-cfg-chat-auth-box" style="display:flex;flex-direction:column;gap:8px;">
-                            <input type="password" id="cqst-cfg-chat-key" class="cqst-input" placeholder="总结接口 API Key (AIzaSy... 或 sk-...)">
+                            <div class="cqst-form-group">
+                                <label class="cqst-form-label">
+                                    <span>当前接口 API Key</span>
+                                    <span style="font-size:11px;font-weight:400;color:var(--cqst-text-faded);">各接口 Key 独立保存，切换不串用</span>
+                                </label>
+                                <div class="cqst-row" style="gap:5px;">
+                                    <input type="password" id="cqst-cfg-chat-key" class="cqst-input" placeholder="Google Gemini API Key (AIzaSy...)">
+                                    <button type="button" class="cqst-btn sm icon-only cqst-toggle-secret" data-secret-target="cqst-cfg-chat-key" title="显示 / 隐藏 API Key">👁️</button>
+                                </div>
+                            </div>
                             <div class="cqst-form-grid-2">
                                 <div class="cqst-form-group">
                                     <label class="cqst-form-label">Base URL</label>
@@ -3154,7 +3272,10 @@ function buildTopDrawerContentHTML() {
                         <div id="cqst-cfg-embed-auth-box" class="cqst-form-grid-2" style="display:none;">
                             <div class="cqst-form-group">
                                 <label class="cqst-form-label">向量专用 API Key</label>
-                                <input type="password" id="cqst-cfg-embed-key" class="cqst-input" placeholder="sk-... 或 AIzaSy...">
+                                <div class="cqst-row" style="gap:5px;">
+                                    <input type="password" id="cqst-cfg-embed-key" class="cqst-input" placeholder="硅基流动 API Key (sk-...)">
+                                    <button type="button" class="cqst-btn sm icon-only cqst-toggle-secret" data-secret-target="cqst-cfg-embed-key" title="显示 / 隐藏向量 Key">👁️</button>
+                                </div>
                             </div>
                             <div class="cqst-form-group">
                                 <label class="cqst-form-label">向量 Base URL</label>
@@ -4715,11 +4836,76 @@ function populateSelect(sel, items, selectedVal) {
     sel.value = (selectedVal && items.includes(selectedVal)) ? selectedVal : (items[0] || '');
 }
 
+function ensureSettingsProviderDrafts() {
+    if (!state.settingsProviderDrafts) {
+        state.settingsProviderDrafts = {
+            chat: normalizeProviderProfiles(state.config.chatProfiles, false),
+            embed: normalizeProviderProfiles(state.config.embedProfiles, true)
+        };
+    }
+    return state.settingsProviderDrafts;
+}
+
+function resetSecretFieldVisibility(inputId) {
+    const input = document.getElementById(inputId);
+    if (input) input.type = 'password';
+    const btn = document.querySelector(`.cqst-toggle-secret[data-secret-target="${inputId}"]`);
+    if (btn) btn.textContent = '👁️';
+}
+
+function stashCurrentProviderInputs(kind, prov) {
+    if (!prov || !PROVIDER_DEFAULTS[prov]) return;
+    const drafts = ensureSettingsProviderDrafts();
+    const isEmbed = kind === 'embed';
+    const keyId = isEmbed ? 'cqst-cfg-embed-key' : 'cqst-cfg-chat-key';
+    const baseId = isEmbed ? 'cqst-cfg-embed-base' : 'cqst-cfg-chat-base';
+    const modelId = isEmbed ? 'cqst-cfg-embed-model' : 'cqst-cfg-chat-model';
+    const customId = isEmbed ? 'cqst-cfg-embed-model-custom' : 'cqst-cfg-chat-model-custom';
+    const def = PROVIDER_DEFAULTS[prov];
+
+    const key = document.getElementById(keyId)?.value.trim() || '';
+    const base = document.getElementById(baseId)?.value.trim() || '';
+    const customModel = document.getElementById(customId)?.value.trim() || '';
+    const selectModel = document.getElementById(modelId)?.value || '';
+    const model = customModel || selectModel || (isEmbed ? def.embedModel : def.chatModel);
+
+    drafts[kind][prov] = { key, base, model };
+}
+
+function applyProviderInputsToUI(kind, prov) {
+    if (!prov || !PROVIDER_DEFAULTS[prov]) return;
+    const drafts = ensureSettingsProviderDrafts();
+    const isEmbed = kind === 'embed';
+    const keyId = isEmbed ? 'cqst-cfg-embed-key' : 'cqst-cfg-chat-key';
+    const baseId = isEmbed ? 'cqst-cfg-embed-base' : 'cqst-cfg-chat-base';
+    const def = PROVIDER_DEFAULTS[prov];
+    const prof = drafts[kind][prov] || {
+        key: '',
+        base: def.base,
+        model: isEmbed ? def.embedModel : def.chatModel
+    };
+
+    const keyEl = document.getElementById(keyId);
+    if (keyEl) {
+        keyEl.value = prof.key || '';
+        keyEl.placeholder = def.keyPlaceholder;
+        resetSecretFieldVisibility(keyId);
+    }
+
+    const baseEl = document.getElementById(baseId);
+    if (baseEl) {
+        baseEl.value = prof.base !== undefined ? prof.base : def.base;
+        if (!baseEl.value && def.base) baseEl.value = def.base;
+        baseEl.placeholder = def.basePlaceholder;
+    }
+}
+
 function populateSettingsModelSelects() {
     const chatProvEl = document.getElementById('cqst-cfg-api-provider');
     const embProvEl = document.getElementById('cqst-cfg-embed-provider');
     if (!chatProvEl || !embProvEl) return;
 
+    const drafts = ensureSettingsProviderDrafts();
     const chatProv = chatProvEl.value || 'gemini';
     const embedProvRaw = embProvEl.value || 'same';
     const effEmbedProv = embedProvRaw === 'same' ? chatProv : embedProvRaw;
@@ -4727,7 +4913,7 @@ function populateSettingsModelSelects() {
     const chatPresetKey = PRESET_MODELS[chatProv] ? chatProv : 'gemini';
     const cachedChat = state.fetchedModels?.[chatPresetKey]?.chat || PRESET_MODELS[chatPresetKey].chat;
     const chatList = Array.from(new Set(cachedChat));
-    let curChatModel = state.config.chatModel;
+    let curChatModel = drafts.chat?.[chatProv]?.model || state.config.chatModel;
     if (chatProv === 'siliconflow' && (!curChatModel || curChatModel.startsWith('gemini-'))) {
         curChatModel = 'Qwen/Qwen2.5-7B-Instruct';
     } else if (chatProv === 'gemini' && (!curChatModel || !curChatModel.startsWith('gemini-'))) {
@@ -4743,7 +4929,9 @@ function populateSettingsModelSelects() {
     const cachedRerank = state.fetchedModels?.[embPresetKey]?.rerank || PRESET_MODELS[embPresetKey].rerank;
     const embList = Array.from(new Set(cachedEmb));
     const rerankList = Array.from(new Set(cachedRerank));
-    let curEmbModel = state.config.embedModel;
+    let curEmbModel = (embedProvRaw !== 'same' && embedProvRaw !== 'local' && drafts.embed?.[embedProvRaw]?.model)
+        ? drafts.embed[embedProvRaw].model
+        : state.config.embedModel;
     if (effEmbedProv === 'siliconflow' && (!curEmbModel || curEmbModel.includes('text-embedding') || curEmbModel.includes('gemini-embedding'))) {
         curEmbModel = 'BAAI/bge-m3';
     } else if (effEmbedProv === 'gemini' && (!curEmbModel || curEmbModel.includes('bge-') || curEmbModel.includes('bce-'))) {
@@ -4789,15 +4977,36 @@ function populateSettingsUI() {
     document.getElementById('cqst-cfg-storage-mode').value = state.config.storageMode || 'local';
     document.getElementById('cqst-cfg-github-dir-mode').value = state.config.githubDirMode || 'isolated';
     document.getElementById('cqst-cfg-github-pat').value = state.config.githubPat || '';
+    resetSecretFieldVisibility('cqst-cfg-github-pat');
     document.getElementById('cqst-cfg-github-repo').value = state.config.githubRepo || '';
 
-    document.getElementById('cqst-cfg-api-provider').value = state.config.apiProvider || 'gemini';
-    document.getElementById('cqst-cfg-chat-key').value = state.config.geminiKey || '';
-    document.getElementById('cqst-cfg-chat-base').value = state.config.geminiBase || 'https://generativelanguage.googleapis.com';
+    state.settingsProviderDrafts = {
+        chat: normalizeProviderProfiles(state.config.chatProfiles, false),
+        embed: normalizeProviderProfiles(state.config.embedProfiles, true)
+    };
 
-    document.getElementById('cqst-cfg-embed-provider').value = state.config.embedProvider || 'same';
-    document.getElementById('cqst-cfg-embed-key').value = state.config.embedKey || '';
-    document.getElementById('cqst-cfg-embed-base').value = state.config.embedBase || 'https://api.siliconflow.cn/v1';
+    const activeChatProv = state.config.apiProvider || 'gemini';
+    const chatProvEl = document.getElementById('cqst-cfg-api-provider');
+    chatProvEl.value = activeChatProv;
+    chatProvEl.dataset.prevProvider = activeChatProv;
+    if (PROVIDER_DEFAULTS[activeChatProv]) {
+        applyProviderInputsToUI('chat', activeChatProv);
+    } else {
+        document.getElementById('cqst-cfg-chat-key').value = '';
+        resetSecretFieldVisibility('cqst-cfg-chat-key');
+    }
+
+    const activeEmbProv = state.config.embedProvider || 'same';
+    const embProvEl = document.getElementById('cqst-cfg-embed-provider');
+    embProvEl.value = activeEmbProv;
+    embProvEl.dataset.prevProvider = activeEmbProv;
+    if (PROVIDER_DEFAULTS[activeEmbProv]) {
+        applyProviderInputsToUI('embed', activeEmbProv);
+    } else {
+        document.getElementById('cqst-cfg-embed-key').value = '';
+        document.getElementById('cqst-cfg-embed-base').value = 'https://api.siliconflow.cn/v1';
+        resetSecretFieldVisibility('cqst-cfg-embed-key');
+    }
 
     document.getElementById('cqst-cfg-rerank-enabled').checked = Boolean(state.config.rerankEnabled);
     document.getElementById('cqst-cfg-inject-pos').value = String(parseIntInRange(state.config.injectPosition, 0, 2, 1));
@@ -5732,27 +5941,33 @@ function bindTopDrawerEvents() {
     // Tab 3: 存储、模型与深度配置
     document.getElementById('cqst-cfg-storage-mode').addEventListener('change', toggleSettingsConditionalBoxes);
     document.getElementById('cqst-cfg-api-provider').addEventListener('change', (e) => {
-        const val = e.target.value;
-        const baseEl = document.getElementById('cqst-cfg-chat-base');
-        if (val === 'siliconflow' && (!baseEl.value.trim() || baseEl.value.includes('generativelanguage.googleapis.com'))) {
-            baseEl.value = 'https://api.siliconflow.cn/v1';
-        } else if (val === 'gemini' && (!baseEl.value.trim() || baseEl.value.includes('siliconflow.cn'))) {
-            baseEl.value = 'https://generativelanguage.googleapis.com';
-        }
+        const prev = e.target.dataset.prevProvider;
+        const next = e.target.value;
+        stashCurrentProviderInputs('chat', prev);
+        e.target.dataset.prevProvider = next;
+        applyProviderInputsToUI('chat', next);
         toggleSettingsConditionalBoxes();
         populateSettingsModelSelects();
     });
 
     document.getElementById('cqst-cfg-embed-provider').addEventListener('change', (e) => {
-        const val = e.target.value;
-        const baseEl = document.getElementById('cqst-cfg-embed-base');
-        if (val === 'siliconflow' && (!baseEl.value.trim() || baseEl.value.includes('generativelanguage.googleapis.com'))) {
-            baseEl.value = 'https://api.siliconflow.cn/v1';
-        } else if (val === 'gemini' && (!baseEl.value.trim() || baseEl.value.includes('siliconflow.cn'))) {
-            baseEl.value = 'https://generativelanguage.googleapis.com';
-        }
+        const prev = e.target.dataset.prevProvider;
+        const next = e.target.value;
+        stashCurrentProviderInputs('embed', prev);
+        e.target.dataset.prevProvider = next;
+        applyProviderInputsToUI('embed', next);
         toggleSettingsConditionalBoxes();
         populateSettingsModelSelects();
+    });
+
+    document.querySelectorAll('.cqst-toggle-secret').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const input = document.getElementById(btn.getAttribute('data-secret-target'));
+            if (!input) return;
+            const showing = input.type === 'text';
+            input.type = showing ? 'password' : 'text';
+            btn.textContent = showing ? '👁️' : '🙈';
+        });
     });
 
     document.getElementById('cqst-btn-fetch-chat').addEventListener('click', async () => {
@@ -5923,17 +6138,39 @@ function bindTopDrawerEvents() {
         state.config.githubRepo = nextRepo;
         resetRemoteShaIfTargetChanged(prevRepo, prevDirMode, nextRepo, nextDirMode);
 
-        state.config.apiProvider = document.getElementById('cqst-cfg-api-provider').value || 'gemini';
-        state.config.geminiKey = document.getElementById('cqst-cfg-chat-key').value.trim();
-        state.config.geminiBase = document.getElementById('cqst-cfg-chat-base').value.trim() || 'https://generativelanguage.googleapis.com';
-        const customChat = document.getElementById('cqst-cfg-chat-model-custom').value.trim();
-        state.config.chatModel = customChat || document.getElementById('cqst-cfg-chat-model').value || 'gemini-2.5-flash';
+        const chatProv = document.getElementById('cqst-cfg-api-provider').value || 'gemini';
+        const embProv = document.getElementById('cqst-cfg-embed-provider').value || 'same';
+        const drafts = ensureSettingsProviderDrafts();
+        stashCurrentProviderInputs('chat', chatProv);
+        stashCurrentProviderInputs('embed', embProv);
 
-        state.config.embedProvider = document.getElementById('cqst-cfg-embed-provider').value || 'same';
-        state.config.embedKey = document.getElementById('cqst-cfg-embed-key').value.trim();
-        state.config.embedBase = document.getElementById('cqst-cfg-embed-base').value.trim() || 'https://api.siliconflow.cn/v1';
+        state.config.chatProfiles = normalizeProviderProfiles(drafts.chat, false);
+        state.config.embedProfiles = normalizeProviderProfiles(drafts.embed, true);
+
+        state.config.apiProvider = chatProv;
+        if (PROVIDER_DEFAULTS[chatProv]) {
+            const cProf = state.config.chatProfiles[chatProv];
+            state.config.geminiKey = cProf.key || '';
+            state.config.geminiBase = cProf.base || PROVIDER_DEFAULTS[chatProv].base;
+            state.config.chatModel = cProf.model || PROVIDER_DEFAULTS[chatProv].chatModel;
+        } else {
+            state.config.geminiKey = '';
+            state.config.chatModel = '';
+        }
+
+        state.config.embedProvider = embProv;
         const customEmbed = document.getElementById('cqst-cfg-embed-model-custom').value.trim();
-        state.config.embedModel = customEmbed || document.getElementById('cqst-cfg-embed-model').value || 'text-embedding-004';
+        const selectEmbed = document.getElementById('cqst-cfg-embed-model').value || '';
+        if (PROVIDER_DEFAULTS[embProv]) {
+            const eProf = state.config.embedProfiles[embProv];
+            state.config.embedKey = eProf.key || '';
+            state.config.embedBase = eProf.base || PROVIDER_DEFAULTS[embProv].base;
+            state.config.embedModel = eProf.model || PROVIDER_DEFAULTS[embProv].embedModel;
+        } else {
+            state.config.embedKey = '';
+            state.config.embedBase = 'https://api.siliconflow.cn/v1';
+            state.config.embedModel = customEmbed || selectEmbed || 'text-embedding-004';
+        }
         state.config.rerankEnabled = document.getElementById('cqst-cfg-rerank-enabled').checked;
         state.config.rerankModel = document.getElementById('cqst-cfg-rerank-model').value || 'BAAI/bge-reranker-v2-m3';
 
