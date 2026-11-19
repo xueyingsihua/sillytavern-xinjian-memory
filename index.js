@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.11';
+const PLUGIN_VERSION = '1.0.12';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -154,6 +154,7 @@ const DEFAULT_CONFIG = {
     chatProfiles: cloneDefaultChatProfiles(),
     embedProfiles: cloneDefaultEmbedProfiles(),
     nodePollingMode: 'round_robin', // 'round_robin' | 'failover'
+    autoSmartFallback: true,
     rerankEnabled: false,
     rerankModel: 'BAAI/bge-reranker-v2-m3',
     topK: 5,
@@ -769,6 +770,7 @@ function loadSettings() {
             state.config.chatProfiles = normalizeProviderProfiles(saved.config.chatProfiles, false);
             state.config.embedProfiles = normalizeProviderProfiles(saved.config.embedProfiles, true);
             state.config.nodePollingMode = state.config.nodePollingMode === 'failover' ? 'failover' : 'round_robin';
+            state.config.autoSmartFallback = state.config.autoSmartFallback !== false;
 
             // 兼容旧版本（<=1.0.6）：首次升级时将单一字段迁移到当前选中的接口档案
             if (!saved.config.chatProfiles && PROVIDER_DEFAULTS[state.config.apiProvider]) {
@@ -1740,6 +1742,65 @@ function pickOrderedCandidates(candidates, scopeKey = 'chat', mode = state.confi
     return [...candidates.slice(start), ...candidates.slice(0, start)];
 }
 
+const BUILTIN_FALLBACK_MODELS = {
+    gemini: ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'],
+    siliconflow: ['Qwen/Qwen2.5-7B-Instruct', 'THUDM/glm-4-9b-chat', 'Qwen/Qwen2.5-72B-Instruct']
+};
+
+function getBuiltInFallbackModels(provider, primaryModel = '', useOpenAI = false) {
+    const rawPrimary = String(primaryModel || '').trim();
+    let poolList = [];
+    if (provider === 'gemini' || (useOpenAI && /^gemini-/i.test(rawPrimary))) {
+        poolList = BUILTIN_FALLBACK_MODELS.gemini;
+    } else if (provider === 'siliconflow') {
+        poolList = BUILTIN_FALLBACK_MODELS.siliconflow;
+    } else if (provider === 'openai') {
+        if (/^gpt-/i.test(rawPrimary)) poolList = ['gpt-4o-mini'];
+        else if (/^deepseek-/i.test(rawPrimary)) poolList = ['deepseek-chat'];
+        else poolList = [];
+    }
+    const primLow = rawPrimary.toLowerCase();
+    const out = [];
+    const seen = new Set();
+    for (const m of poolList) {
+        const clean = String(m || '').trim();
+        const low = clean.toLowerCase();
+        if (!clean || low === primLow || seen.has(low)) continue;
+        seen.add(low);
+        out.push(clean);
+    }
+    return out;
+}
+
+function buildEffectiveBackupModels({
+    provider = 'gemini',
+    primaryModel = '',
+    useOpenAI = false,
+    userBackupModels = '',
+    autoSmartFallback = true
+} = {}) {
+    const primLow = String(primaryModel || '').trim().toLowerCase();
+    const userList = splitBackupModels(userBackupModels);
+    const builtInList = autoSmartFallback ? getBuiltInFallbackModels(provider, primaryModel, useOpenAI) : [];
+    const out = [];
+    const seen = new Set();
+    for (const m of [...userList, ...builtInList]) {
+        const clean = String(m || '').trim();
+        const low = clean.toLowerCase();
+        if (!clean || low === primLow || seen.has(low)) continue;
+        seen.add(low);
+        out.push(clean);
+    }
+    return out;
+}
+
+function computeJitterDelayMs(baseMs, jitterRatio = 0.25) {
+    const ms = Math.max(0, Number(baseMs) || 0);
+    if (ms <= 20) return ms;
+    const delta = (Math.random() * 2 - 1) * jitterRatio * ms;
+    return Math.max(200, Math.round(ms + delta));
+}
+
 async function runWithNodePolling({
     scopeKey = 'chat',
     candidates = [],
@@ -1749,6 +1810,7 @@ async function runWithNodePolling({
     isEmbed = false,
     signal = null,
     singleNodeRetries = 2,
+    fallbackModelRetries = 0,
     retryDelaysMs = [1500, 3000],
     multiNodeRetryDelayMs = 1800,
     onStatus = null,
@@ -1773,7 +1835,8 @@ async function runWithNodePolling({
             if (triedSignatures.has(sig)) continue;
             triedSignatures.add(sig);
 
-            const maxAttempts = 1 + Math.max(0, singleNodeRetries);
+            const retriesForModel = mIdx === 0 ? Math.max(0, singleNodeRetries) : Math.max(0, fallbackModelRetries);
+            const maxAttempts = 1 + retriesForModel;
             for (let tryNo = 1; tryNo <= maxAttempts; tryNo++) {
                 if (signal?.aborted) throw createAbortError();
                 if (tryNo > 1 || mIdx > 0) {
@@ -1794,7 +1857,8 @@ async function runWithNodePolling({
                     if (isAbortError(err)) throw err;
                     errors.push({ label: single.label, model: actualModel, err });
                     if (tryNo < maxAttempts && isRetryableNodeError(err)) {
-                        const waitMs = retryDelaysMs[tryNo - 1] ?? retryDelaysMs[retryDelaysMs.length - 1] ?? 1500;
+                        const baseWait = retryDelaysMs[tryNo - 1] ?? retryDelaysMs[retryDelaysMs.length - 1] ?? 1500;
+                        const waitMs = computeJitterDelayMs(baseWait);
                         onStatus?.(`遇到 ${describeShortFailure(err)}，${(waitMs / 1000).toFixed(1)} 秒后自动重试 (${tryNo + 1}/${maxAttempts})...`);
                         await sleepWithSignal(waitMs, signal);
                         continue;
@@ -1846,8 +1910,9 @@ async function runWithNodePolling({
             if (mIdx === 0 && passRetryables.length > 0 && multiNodeRetryDelayMs >= 0) {
                 const retryTarget = passRetryables[0];
                 if (signal?.aborted) throw createAbortError();
-                onStatus?.(`全部 ${ordered.length} 个节点首轮均遇阻，${(multiNodeRetryDelayMs / 1000).toFixed(1)} 秒后回试 [${retryTarget.node.label}]...`);
-                await sleepWithSignal(multiNodeRetryDelayMs, signal);
+                const multiWaitMs = computeJitterDelayMs(multiNodeRetryDelayMs);
+                onStatus?.(`全部 ${ordered.length} 个节点首轮均遇阻，${(multiWaitMs / 1000).toFixed(1)} 秒后回试 [${retryTarget.node.label}]...`);
+                await sleepWithSignal(multiWaitMs, signal);
                 attemptCount++;
                 try {
                     const value = await executeAttempt(retryTarget.node, retryTarget.actualModel, {
@@ -2232,7 +2297,8 @@ async function callChatSingleNode(node, model, {
     signal = null,
     label = '总结接口',
     includeReasoning = false,
-    requireNonEmpty = false
+    requireNonEmpty = false,
+    apiVersion = 'v1beta'
 } = {}) {
     let replyText = '';
     if (node.useOpenAI) {
@@ -2259,20 +2325,26 @@ async function callChatSingleNode(node, model, {
         const msg = data.choices?.[0]?.message;
         replyText = String(includeReasoning ? (msg?.content || msg?.reasoning_content || '') : (msg?.content || ''));
     } else {
+        const safetySettings = [
+            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ];
+        if (apiVersion === 'v1beta') {
+            safetySettings.push({ category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' });
+        }
+        const effectiveUserText = (sys && apiVersion !== 'v1beta')
+            ? `${sys}\n\n待提取内容：\n${userText}`
+            : userText;
         const payload = {
-            contents: [{ role: 'user', parts: [{ text: userText }] }],
-            safetySettings: [
-                { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-                { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' }
-            ]
+            contents: [{ role: 'user', parts: [{ text: effectiveUserText }] }],
+            safetySettings
         };
-        if (sys) {
+        if (sys && apiVersion === 'v1beta') {
             payload.systemInstruction = { parts: [{ text: sys }] };
         }
-        const res = await fetchWithTimeout(`${node.base}/v1beta/models/${model}:generateContent?key=${encodeURIComponent(node.key)}`, {
+        const res = await fetchWithTimeout(`${node.base}/${apiVersion}/models/${model}:generateContent?key=${encodeURIComponent(node.key)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -2293,8 +2365,24 @@ async function callChatSingleNode(node, model, {
     return replyText;
 }
 
+async function callChatWithVersionFallback(node, model, opts = {}) {
+    try {
+        return await callChatSingleNode(node, model, { ...opts, apiVersion: 'v1beta' });
+    } catch (err) {
+        if (isAbortError(err)) throw err;
+        const canTryV1 = Boolean(opts.enableV1Fallback)
+            && !node.useOpenAI
+            && String(node.base || '').toLowerCase() === 'https://generativelanguage.googleapis.com'
+            && [500, 502, 503, 504, 404].includes(Number(err?.cqstHttpStatus));
+        if (!canTryV1) throw err;
+        opts.onVersionSwitch?.(node, model, err.cqstHttpStatus);
+        return await callChatSingleNode(node, model, { ...opts, apiVersion: 'v1' });
+    }
+}
+
 async function invokeSummaryApi(sys, chunkText, { signal = null, onStatus = null } = {}) {
     const provider = state.config.apiProvider || 'gemini';
+    const autoSmartFallback = state.config.autoSmartFallback !== false;
 
     if (provider === 'st_current') {
         const ctx = getSTContext();
@@ -2304,18 +2392,56 @@ async function invokeSummaryApi(sys, chunkText, { signal = null, onStatus = null
         const combined = `${sys}\n\n待提取对话：\n${chunkText}`;
         const fnSrc = Function.prototype.toString.call(ctx.generateQuietPrompt);
         const usesOptionsObj = /^\s*(async\s+)?\w*\s*\(\s*\{/.test(fnSrc);
-        const quietCall = usesOptionsObj
-            ? ctx.generateQuietPrompt({ quietPrompt: combined, skipWIAN: true })
-            : ctx.generateQuietPrompt(combined, false, true);
-        const reply = await raceWithSignalAndTimeout(quietCall, { timeoutMs: 90000, signal, label: '酒馆主 API 总结' });
-        return { text: String(reply || ''), node: null, model: 'st_current', switchedFromCount: 0, nodeTotal: 1 };
+        const maxAttempts = autoSmartFallback ? 3 : 1;
+        const retryWaits = [1800, 3500];
+        let lastStErr = null;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (signal?.aborted) throw createAbortError();
+            try {
+                const quietCall = usesOptionsObj
+                    ? ctx.generateQuietPrompt({ quietPrompt: combined, skipWIAN: true })
+                    : ctx.generateQuietPrompt(combined, false, true);
+                const reply = await raceWithSignalAndTimeout(quietCall, { timeoutMs: 90000, signal, label: '酒馆主 API 总结' });
+                const text = String(reply || '');
+                if (!text.trim() && attempt < maxAttempts) {
+                    const emptyErr = new Error('酒馆主 API 返回空响应');
+                    emptyErr.cqstStRetryable = true;
+                    throw emptyErr;
+                }
+                return { text, node: null, model: 'st_current', switchedFromCount: attempt - 1, nodeTotal: 1 };
+            } catch (err) {
+                if (isAbortError(err)) throw err;
+                lastStErr = err;
+                const msg = String(err?.message || err || '').toLowerCase();
+                const isRetryableSt = Boolean(err?.cqstStRetryable)
+                    || /(?:^|\D)(?:429|500|502|503|504|52\d)(?:\D|$)|overload|unavailable|timeout|超时|fetch|network/i.test(msg);
+                if (attempt < maxAttempts && isRetryableSt) {
+                    const waitMs = computeJitterDelayMs(retryWaits[attempt - 1] ?? 2500);
+                    onStatus?.(`酒馆主 API 遇到临时异常，${(waitMs / 1000).toFixed(1)} 秒后自动重试 (${attempt + 1}/${maxAttempts})...`);
+                    await sleepWithSignal(waitMs, signal);
+                    continue;
+                }
+                throw err;
+            }
+        }
+        throw lastStErr || new Error('酒馆主 API 总结失败');
     }
 
     const candidates = getChatEndpointCandidates();
     const prof = state.config.chatProfiles?.[provider];
     const primaryModel = (state.config.chatModel || '').trim();
-    const backupModels = splitBackupModels(prof?.backupModels || '');
-    const timeoutMs = candidates.length > 1 ? 45000 : 90000;
+    const resolvedPrimary = candidates[0]
+        ? resolveModelForCandidate(candidates[0], primaryModel, false)
+        : primaryModel;
+    const backupModels = buildEffectiveBackupModels({
+        provider,
+        primaryModel: resolvedPrimary,
+        useOpenAI: Boolean(candidates[0]?.useOpenAI),
+        userBackupModels: prof?.backupModels || '',
+        autoSmartFallback
+    });
+    const timeoutMs = candidates.length > 1 ? 45000 : (backupModels.length > 0 ? 55000 : 90000);
 
     const res = await runWithNodePolling({
         scopeKey: 'chat',
@@ -2326,15 +2452,18 @@ async function invokeSummaryApi(sys, chunkText, { signal = null, onStatus = null
         isEmbed: false,
         signal,
         singleNodeRetries: 2,
+        fallbackModelRetries: 0,
         onStatus,
-        executeAttempt: (node, model) => callChatSingleNode(node, model, {
+        executeAttempt: (node, model) => callChatWithVersionFallback(node, model, {
             sys,
             userText: chunkText,
             timeoutMs,
             signal,
             label: '总结接口',
             includeReasoning: false,
-            requireNonEmpty: false
+            requireNonEmpty: false,
+            enableV1Fallback: autoSmartFallback,
+            onVersionSwitch: (n, m, code) => onStatus?.(`官方 v1beta 返回 ${code}，切换 Gemini v1 稳定端点（${m}）...`)
         })
     });
 
@@ -3757,10 +3886,14 @@ function buildTopDrawerContentHTML() {
                                     <input type="text" id="cqst-cfg-chat-model-custom" class="cqst-input" placeholder="可选：手填其他模型名（留空即使用上方下拉模型）">
                                 </div>
                             </div>
+                            <label style="font-size:11.5px;display:flex;align-items:flex-start;gap:6px;cursor:pointer;color:var(--cqst-text-strong);line-height:1.45;">
+                                <input type="checkbox" class="cqst-checkbox" id="cqst-cfg-auto-smart-fallback" style="margin-top:2px;">
+                                <span>✨ <b>免配置智能容灾（推荐）</b>：无需手填备用地址，遇 503/429/超时 自动退避重试、切官方 v1 稳定端点并顺延同系稳定模型（如 2.5-flash-lite / 2.0-flash）</span>
+                            </label>
                             <details class="cqst-node-pool-box" id="cqst-cfg-chat-pool-details">
                                 <summary class="cqst-node-pool-summary">
-                                    <span class="cqst-node-pool-summary-title">🌐 多机房 / 备用节点轮询（抗 503 / 超时）</span>
-                                    <span class="cqst-status-pill" id="cqst-cfg-chat-pool-badge">单节点 · 503自动重试</span>
+                                    <span class="cqst-node-pool-summary-title">🌐 进阶：手动添加多机房 / 备用节点轮询（选填）</span>
+                                    <span class="cqst-status-pill" id="cqst-cfg-chat-pool-badge">✨ 智能容灾已开</span>
                                 </summary>
                                 <div class="cqst-node-pool-body">
                                     <div class="cqst-form-group">
@@ -3773,7 +3906,7 @@ function buildTopDrawerContentHTML() {
                                     <div class="cqst-form-group">
                                         <label class="cqst-form-label">备用节点 / 机房池（每行一个）</label>
                                         <textarea id="cqst-cfg-chat-backup-bases" class="cqst-textarea cqst-node-pool-textarea" rows="3" placeholder="每行一条，支持以下格式：&#10;https://proxy2.example.com&#10;https://proxy3.example.com|专属Key&#10;openai:https://oneapi.example.com/v1|sk-xxx|gpt-4o-mini"></textarea>
-                                        <span class="cqst-form-hint">可只写备用网址（自动复用主 Key），或用 <code>|</code> 附带专属 Key / 模型；写 <code>|备用Key</code> 可同机房轮换 Key；以 <code>openai:</code> 开头可混用兼容反代。即使只填 1 个节点，遇 503/429 也会自动退避重试。</span>
+                                        <span class="cqst-form-hint">不知道填啥可留空（上方「免配置智能容灾」已自动兜底）；若需像 aistudioapi 那样自动切换 Google Vertex 多区域机房（美中/美东/欧洲等，受浏览器跨域限制无法前端直连），直接选「🍺 复用酒馆当前主 API」或将你的 aistudioapi 反代网址填在上方 Base URL、面板密码填在 API Key 即可。进阶可写 <code>网址</code>、<code>网址|专属Key</code>、<code>|备用Key</code> 或 <code>openai:网址|Key|模型</code>。</span>
                                     </div>
                                     <div class="cqst-form-group">
                                         <label class="cqst-form-label">备用降级模型（可选，逗号分隔）</label>
@@ -5574,9 +5707,12 @@ function updateNodePoolBadge(kind = 'chat') {
     if (!badge) return;
 
     const provider = document.getElementById(isEmbed ? 'cqst-cfg-embed-provider' : 'cqst-cfg-api-provider')?.value || 'gemini';
+    const smartEl = document.getElementById('cqst-cfg-auto-smart-fallback');
+    const smartOn = !isEmbed && (smartEl ? Boolean(smartEl.checked) : state.config.autoSmartFallback !== false);
+
     if (provider === 'st_current' || provider === 'same' || provider === 'local') {
-        badge.textContent = '单节点 · 503自动重试';
-        badge.className = 'cqst-status-pill';
+        badge.textContent = (!isEmbed && smartOn) ? '✨ 智能容灾已开' : '单节点 · 503重试';
+        badge.className = (!isEmbed && smartOn) ? 'cqst-status-pill ok' : 'cqst-status-pill';
         return;
     }
 
@@ -5588,15 +5724,24 @@ function updateNodePoolBadge(kind = 'chat') {
         ? []
         : splitBackupModels(document.getElementById('cqst-cfg-chat-backup-models')?.value || '');
 
+    if (candidates.length <= 1 && backupModels.length === 0) {
+        if (smartOn) {
+            badge.textContent = '✨ 智能容灾已开';
+            badge.className = 'cqst-status-pill ok';
+        } else {
+            badge.textContent = '单节点 · 503重试';
+            badge.className = 'cqst-status-pill';
+        }
+        return;
+    }
+
     const parts = [];
     if (candidates.length > 1) parts.push(`${candidates.length} 节点轮询`);
-    else parts.push('单节点 · 503自动重试');
     if (backupModels.length > 0) parts.push(`${backupModels.length} 备用模型`);
+    else if (smartOn) parts.push('智能兜底');
 
     badge.textContent = parts.join(' + ');
-    badge.className = candidates.length > 1 || backupModels.length > 0
-        ? 'cqst-status-pill ok'
-        : 'cqst-status-pill';
+    badge.className = 'cqst-status-pill ok';
 }
 
 function stashCurrentProviderInputs(kind, prov) {
@@ -5764,6 +5909,8 @@ function populateSettingsUI({ force = false } = {}) {
 
     const pollingEl = document.getElementById('cqst-cfg-polling-mode');
     if (pollingEl) pollingEl.value = state.config.nodePollingMode === 'failover' ? 'failover' : 'round_robin';
+    const smartEl = document.getElementById('cqst-cfg-auto-smart-fallback');
+    if (smartEl) smartEl.checked = state.config.autoSmartFallback !== false;
 
     const activeChatProv = state.config.apiProvider || 'gemini';
     const chatProvEl = document.getElementById('cqst-cfg-api-provider');
@@ -6051,7 +6198,9 @@ async function testChatConnectionFromUI() {
     const rawKey = document.getElementById('cqst-cfg-chat-key')?.value.trim() || '';
     const rawBase = document.getElementById('cqst-cfg-chat-base')?.value.trim() || '';
     const backupBases = document.getElementById('cqst-cfg-chat-backup-bases')?.value || '';
-    const backupModels = splitBackupModels(document.getElementById('cqst-cfg-chat-backup-models')?.value || '');
+    const rawBackupModelsText = document.getElementById('cqst-cfg-chat-backup-models')?.value || '';
+    const smartEl = document.getElementById('cqst-cfg-auto-smart-fallback');
+    const autoSmartFallback = smartEl ? Boolean(smartEl.checked) : (state.config.autoSmartFallback !== false);
     const pollingMode = document.getElementById('cqst-cfg-polling-mode')?.value || state.config.nodePollingMode || 'round_robin';
     const customModel = document.getElementById('cqst-cfg-chat-model-custom')?.value.trim() || '';
     const selectModel = document.getElementById('cqst-cfg-chat-model')?.value || '';
@@ -6071,6 +6220,15 @@ async function testChatConnectionFromUI() {
     const initialModel = candidates.length
         ? resolveModelForCandidate(candidates[0], rawPicked, false)
         : '酒馆当前主 API';
+    const backupModels = provider === 'st_current'
+        ? []
+        : buildEffectiveBackupModels({
+            provider,
+            primaryModel: initialModel,
+            useOpenAI: Boolean(candidates[0]?.useOpenAI),
+            userBackupModels: rawBackupModelsText,
+            autoSmartFallback
+        });
     const modelLabel = provider === 'st_current'
         ? '酒馆当前主 API'
         : `${provider} · ${initialModel}${candidates.length > 1 ? ` · ${candidates.length}节点` : ''}`;
@@ -6100,7 +6258,7 @@ async function testChatConnectionFromUI() {
                 throw new Error('接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文');
             }
         } else {
-            const timeoutMs = candidates.length > 1 ? 20000 : 30000;
+            const timeoutMs = candidates.length > 1 ? 20000 : (backupModels.length > 0 ? 25000 : 30000);
             const res = await runWithNodePolling({
                 scopeKey: 'chat',
                 candidates,
@@ -6110,8 +6268,9 @@ async function testChatConnectionFromUI() {
                 isEmbed: false,
                 signal,
                 singleNodeRetries: 1,
+                fallbackModelRetries: 0,
                 onStatus: (msg) => setInlineTestResult('cqst-cfg-chat-test-result', 'pending', `⏳ ${msg}`),
-                executeAttempt: (node, model) => callChatSingleNode(node, model, {
+                executeAttempt: (node, model) => callChatWithVersionFallback(node, model, {
                     userText: '请仅回复 OK',
                     maxTokens: 128,
                     temperature: 0,
@@ -6119,7 +6278,9 @@ async function testChatConnectionFromUI() {
                     signal,
                     label: '总结测试消息',
                     includeReasoning: true,
-                    requireNonEmpty: true
+                    requireNonEmpty: true,
+                    enableV1Fallback: autoSmartFallback,
+                    onVersionSwitch: (n, m, code) => setInlineTestResult('cqst-cfg-chat-test-result', 'pending', `⏳ 官方 v1beta 返回 ${code}，切换 Gemini v1 稳定端点（${m}）...`)
                 })
             });
             replyText = res.value;
@@ -7034,6 +7195,7 @@ function bindTopDrawerEvents() {
     ['cqst-cfg-chat-key', 'cqst-cfg-chat-base', 'cqst-cfg-chat-backup-bases', 'cqst-cfg-chat-backup-models'].forEach(id => {
         document.getElementById(id)?.addEventListener('input', () => updateNodePoolBadge('chat'));
     });
+    document.getElementById('cqst-cfg-auto-smart-fallback')?.addEventListener('change', () => updateNodePoolBadge('chat'));
     ['cqst-cfg-embed-key', 'cqst-cfg-embed-base', 'cqst-cfg-embed-backup-bases'].forEach(id => {
         document.getElementById(id)?.addEventListener('input', () => updateNodePoolBadge('embed'));
     });
@@ -7228,6 +7390,8 @@ function bindTopDrawerEvents() {
         state.config.chatProfiles = normalizeProviderProfiles(drafts.chat, false);
         state.config.embedProfiles = normalizeProviderProfiles(drafts.embed, true);
         state.config.nodePollingMode = document.getElementById('cqst-cfg-polling-mode')?.value === 'failover' ? 'failover' : 'round_robin';
+        const smartSaveEl = document.getElementById('cqst-cfg-auto-smart-fallback');
+        if (smartSaveEl) state.config.autoSmartFallback = Boolean(smartSaveEl.checked);
         state.nodeCursors = { chat: 0, embed: 0, rerank: 0 };
 
         state.config.apiProvider = chatProv;
