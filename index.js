@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.14';
+const PLUGIN_VERSION = '1.0.15';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -3933,7 +3933,7 @@ function buildTopDrawerContentHTML() {
                                     <div class="cqst-form-group">
                                         <label class="cqst-form-label">备用节点 / 机房池（每行一个）</label>
                                         <textarea id="cqst-cfg-chat-backup-bases" class="cqst-textarea cqst-node-pool-textarea" rows="3" placeholder="每行一条，支持以下格式：&#10;https://proxy2.example.com&#10;https://proxy3.example.com|专属Key&#10;openai:https://oneapi.example.com/v1|sk-xxx|gpt-4o-mini"></textarea>
-                                        <span class="cqst-form-hint">不知道填啥可留空（上方「免配置智能容灾」已自动兜底）；若需像 aistudioapi 那样自动切换 Google Vertex 多区域机房（美中/美东/欧洲等，受浏览器跨域限制无法前端直连），直接选「🍺 复用酒馆当前主 API」或将你的 aistudioapi 反代网址填在上方 Base URL、面板密码填在 API Key 即可。进阶可写 <code>网址</code>、<code>网址|专属Key</code>、<code>|备用Key</code> 或 <code>openai:网址|Key|模型</code>。</span>
+                                        <span class="cqst-form-hint">不知道填啥可留空（上方「免配置智能容灾」已自动兜底）；若手头有多个反代/中转站或自建轮询代理，可每行填入 <code>网址</code>、<code>网址|专属Key</code>、<code>|备用Key</code> 或 <code>openai:网址|Key|模型</code>，也可直接选上方「🍺 复用酒馆当前主 API」。</span>
                                     </div>
                                     <div class="cqst-form-group">
                                         <label class="cqst-form-label">备用降级模型（可选，逗号分隔）</label>
