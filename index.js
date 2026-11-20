@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.13';
+const PLUGIN_VERSION = '1.0.14';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -24,7 +24,7 @@ const DEFAULT_TAGS = ['核心设定', '日常点滴', '重要事件', '偏好习
 
 const PRESET_MODELS = {
     gemini: {
-        chat: ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
+        chat: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
         embed: ['text-embedding-004', 'gemini-embedding-001'],
         rerank: ['BAAI/bge-reranker-v2-m3']
     },
@@ -34,7 +34,7 @@ const PRESET_MODELS = {
         rerank: ['BAAI/bge-reranker-v2-m3', 'netease-youdao/bce-reranker-base_v1', 'Pro/BAAI/bge-reranker-v2-m3']
     },
     openai: {
-        chat: ['gpt-4o-mini', 'gpt-4o', 'deepseek-chat', 'deepseek-reasoner', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash'],
+        chat: ['gpt-4o-mini', 'gpt-4o', 'deepseek-chat', 'deepseek-reasoner', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'],
         embed: ['text-embedding-3-small', 'text-embedding-3-large', 'BAAI/bge-m3'],
         rerank: ['BAAI/bge-reranker-v2-m3']
     }
@@ -1743,7 +1743,7 @@ function pickOrderedCandidates(candidates, scopeKey = 'chat', mode = state.confi
 }
 
 const BUILTIN_FALLBACK_MODELS = {
-    gemini: ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'],
+    gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'],
     siliconflow: ['Qwen/Qwen2.5-7B-Instruct', 'THUDM/glm-4-9b-chat', 'Qwen/Qwen2.5-72B-Instruct']
 };
 
@@ -3915,7 +3915,7 @@ function buildTopDrawerContentHTML() {
                             </div>
                             <label style="font-size:11.5px;display:flex;align-items:flex-start;gap:6px;cursor:pointer;color:var(--cqst-text-strong);line-height:1.45;">
                                 <input type="checkbox" class="cqst-checkbox" id="cqst-cfg-auto-smart-fallback" style="margin-top:2px;">
-                                <span>✨ <b>免配置智能容灾（推荐）</b>：无需手填备用地址，遇 503/429/超时 自动退避重试、切官方 v1 稳定端点并顺延同系稳定模型（如 3.5-flash-lite / 3.5-flash / 2.5-flash）</span>
+                                <span>✨ <b>免配置智能容灾（推荐）</b>：无需手填备用地址，遇 503/429/超时 自动退避重试、切官方 v1 稳定端点并顺延同系稳定模型（如 3.8 / 3.7 / 3.6 / 3.5-flash / 3.5-flash-lite）</span>
                             </label>
                             <details class="cqst-node-pool-box" id="cqst-cfg-chat-pool-details">
                                 <summary class="cqst-node-pool-summary">
@@ -3937,7 +3937,7 @@ function buildTopDrawerContentHTML() {
                                     </div>
                                     <div class="cqst-form-group">
                                         <label class="cqst-form-label">备用降级模型（可选，逗号分隔）</label>
-                                        <input type="text" id="cqst-cfg-chat-backup-models" class="cqst-input" placeholder="如：gemini-3.5-flash-lite, gemini-3.5-flash, gemini-2.5-flash（所有节点主模型均过载时顺延切换）">
+                                        <input type="text" id="cqst-cfg-chat-backup-models" class="cqst-input" placeholder="如：gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash-lite（所有节点主模型均过载时顺延切换）">
                                     </div>
                                 </div>
                             </details>
