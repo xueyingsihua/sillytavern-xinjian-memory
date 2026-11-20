@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.12';
+const PLUGIN_VERSION = '1.0.13';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -24,7 +24,7 @@ const DEFAULT_TAGS = ['核心设定', '日常点滴', '重要事件', '偏好习
 
 const PRESET_MODELS = {
     gemini: {
-        chat: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
+        chat: ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
         embed: ['text-embedding-004', 'gemini-embedding-001'],
         rerank: ['BAAI/bge-reranker-v2-m3']
     },
@@ -34,7 +34,7 @@ const PRESET_MODELS = {
         rerank: ['BAAI/bge-reranker-v2-m3', 'netease-youdao/bce-reranker-base_v1', 'Pro/BAAI/bge-reranker-v2-m3']
     },
     openai: {
-        chat: ['gpt-4o-mini', 'gpt-4o', 'deepseek-chat', 'gemini-2.5-flash'],
+        chat: ['gpt-4o-mini', 'gpt-4o', 'deepseek-chat', 'deepseek-reasoner', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash'],
         embed: ['text-embedding-3-small', 'text-embedding-3-large', 'BAAI/bge-m3'],
         rerank: ['BAAI/bge-reranker-v2-m3']
     }
@@ -43,7 +43,7 @@ const PRESET_MODELS = {
 const PROVIDER_DEFAULTS = {
     gemini: {
         base: 'https://generativelanguage.googleapis.com',
-        chatModel: 'gemini-2.5-flash',
+        chatModel: 'gemini-3.5-flash-lite',
         embedModel: 'text-embedding-004',
         keyPlaceholder: 'Google Gemini API Key (AIzaSy...)',
         basePlaceholder: 'https://generativelanguage.googleapis.com'
@@ -146,7 +146,7 @@ const DEFAULT_CONFIG = {
     apiProvider: 'gemini', // 'gemini' | 'siliconflow' | 'openai' | 'st_current'
     geminiKey: '',
     geminiBase: 'https://generativelanguage.googleapis.com',
-    chatModel: 'gemini-2.5-flash',
+    chatModel: 'gemini-3.5-flash-lite',
     embedProvider: 'same', // 'same' | 'siliconflow' | 'gemini' | 'openai' | 'local'
     embedKey: '',
     embedBase: 'https://api.siliconflow.cn/v1',
@@ -1724,7 +1724,7 @@ function resolveModelForCandidate(candidate, primaryModel = '', isEmbed = false)
         }
         return rawPicked;
     }
-    return rawPicked || 'gemini-2.5-flash';
+    return rawPicked || 'gemini-3.5-flash-lite';
 }
 
 function pickOrderedCandidates(candidates, scopeKey = 'chat', mode = state.config.nodePollingMode) {
@@ -1743,7 +1743,7 @@ function pickOrderedCandidates(candidates, scopeKey = 'chat', mode = state.confi
 }
 
 const BUILTIN_FALLBACK_MODELS = {
-    gemini: ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'],
+    gemini: ['gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'],
     siliconflow: ['Qwen/Qwen2.5-7B-Instruct', 'THUDM/glm-4-9b-chat', 'Qwen/Qwen2.5-72B-Instruct']
 };
 
@@ -2322,43 +2322,70 @@ async function callChatSingleNode(node, model, {
             throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
         }
         const data = await res.json();
-        const msg = data.choices?.[0]?.message;
+        const choice = data.choices?.[0];
+        const msg = choice?.message;
+        const finishReason = String(choice?.finish_reason || '');
         replyText = String(includeReasoning ? (msg?.content || msg?.reasoning_content || '') : (msg?.content || ''));
-    } else {
-        const safetySettings = [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
-        ];
-        if (apiVersion === 'v1beta') {
-            safetySettings.push({ category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' });
+        if (!replyText.replace(/\s+/g, ' ').trim() && (requireNonEmpty || finishReason === 'length' || finishReason === 'content_filter')) {
+            let errText = '接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文';
+            if (finishReason === 'length') {
+                errText = '接口返回为空 (length：思考/输出额度已耗尽，未产出正文)';
+            } else if (finishReason) {
+                errText = `接口返回为空 (${finishReason})`;
+            }
+            const emptyErr = new Error(errText);
+            emptyErr.cqstRetryable = false;
+            throw emptyErr;
         }
-        const effectiveUserText = (sys && apiVersion !== 'v1beta')
-            ? `${sys}\n\n待提取内容：\n${userText}`
-            : userText;
-        const payload = {
-            contents: [{ role: 'user', parts: [{ text: effectiveUserText }] }],
-            safetySettings
-        };
-        if (sys && apiVersion === 'v1beta') {
-            payload.systemInstruction = { parts: [{ text: sys }] };
-        }
-        const res = await fetchWithTimeout(`${node.base}/${apiVersion}/models/${model}:generateContent?key=${encodeURIComponent(node.key)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        }, { timeoutMs, signal, label: label === '总结接口' ? 'Gemini 总结接口' : label });
-        if (!res.ok) {
-            const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
-            throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
-        }
-        const data = await res.json();
-        replyText = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+        return replyText;
     }
 
-    if (requireNonEmpty && !replyText.replace(/\s+/g, ' ').trim()) {
-        const emptyErr = new Error('接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文');
+    const safetySettings = [
+        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+    ];
+    if (apiVersion === 'v1beta') {
+        safetySettings.push({ category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'BLOCK_NONE' });
+    }
+    const effectiveUserText = (sys && apiVersion !== 'v1beta')
+        ? `${sys}\n\n待提取内容：\n${userText}`
+        : userText;
+    const payload = {
+        contents: [{ role: 'user', parts: [{ text: effectiveUserText }] }],
+        safetySettings
+    };
+    if (sys && apiVersion === 'v1beta') {
+        payload.systemInstruction = { parts: [{ text: sys }] };
+    }
+    const res = await fetchWithTimeout(`${node.base}/${apiVersion}/models/${model}:generateContent?key=${encodeURIComponent(node.key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    }, { timeoutMs, signal, label: label === '总结接口' ? 'Gemini 总结接口' : label });
+    if (!res.ok) {
+        const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 140);
+        throw createHttpError(res.status, `HTTP ${res.status}${formatHttpErrorHint(res.status)}${body ? `：${body}` : ''}`);
+    }
+    const data = await res.json();
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    const finishReason = String(data.candidates?.[0]?.finishReason || '');
+    const blockReason = String(data.promptFeedback?.blockReason || '');
+    const nonThoughtText = parts.filter(p => !p.thought).map(p => p.text || '').join('');
+    const allPartsText = parts.map(p => p.text || '').join('');
+    replyText = nonThoughtText || (includeReasoning && finishReason !== 'MAX_TOKENS' ? allPartsText : '');
+
+    if (!replyText.replace(/\s+/g, ' ').trim() && (requireNonEmpty || finishReason === 'MAX_TOKENS' || Boolean(blockReason) || parts.some(p => p.thought))) {
+        let errText = '接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文';
+        if (finishReason === 'MAX_TOKENS') {
+            errText = '接口返回为空 (MAX_TOKENS：思考/输出额度耗尽，未产出正文)';
+        } else if (blockReason) {
+            errText = `接口返回为空 (拦截原因: ${blockReason})`;
+        } else if (finishReason && finishReason !== 'STOP') {
+            errText = `接口返回为空 (${finishReason})`;
+        }
+        const emptyErr = new Error(errText);
         emptyErr.cqstRetryable = false;
         throw emptyErr;
     }
@@ -3888,7 +3915,7 @@ function buildTopDrawerContentHTML() {
                             </div>
                             <label style="font-size:11.5px;display:flex;align-items:flex-start;gap:6px;cursor:pointer;color:var(--cqst-text-strong);line-height:1.45;">
                                 <input type="checkbox" class="cqst-checkbox" id="cqst-cfg-auto-smart-fallback" style="margin-top:2px;">
-                                <span>✨ <b>免配置智能容灾（推荐）</b>：无需手填备用地址，遇 503/429/超时 自动退避重试、切官方 v1 稳定端点并顺延同系稳定模型（如 2.5-flash-lite / 2.0-flash）</span>
+                                <span>✨ <b>免配置智能容灾（推荐）</b>：无需手填备用地址，遇 503/429/超时 自动退避重试、切官方 v1 稳定端点并顺延同系稳定模型（如 3.5-flash-lite / 3.5-flash / 2.5-flash）</span>
                             </label>
                             <details class="cqst-node-pool-box" id="cqst-cfg-chat-pool-details">
                                 <summary class="cqst-node-pool-summary">
@@ -3910,7 +3937,7 @@ function buildTopDrawerContentHTML() {
                                     </div>
                                     <div class="cqst-form-group">
                                         <label class="cqst-form-label">备用降级模型（可选，逗号分隔）</label>
-                                        <input type="text" id="cqst-cfg-chat-backup-models" class="cqst-input" placeholder="如：gemini-2.5-flash-lite, gemini-2.0-flash（所有节点主模型均过载时顺延切换）">
+                                        <input type="text" id="cqst-cfg-chat-backup-models" class="cqst-input" placeholder="如：gemini-3.5-flash-lite, gemini-3.5-flash, gemini-2.5-flash（所有节点主模型均过载时顺延切换）">
                                     </div>
                                 </div>
                             </details>
@@ -5833,7 +5860,7 @@ function populateSettingsModelSelects() {
     if (chatProv === 'siliconflow' && (!curChatModel || curChatModel.startsWith('gemini-'))) {
         curChatModel = 'Qwen/Qwen2.5-7B-Instruct';
     } else if (chatProv === 'gemini' && (!curChatModel || !curChatModel.startsWith('gemini-'))) {
-        curChatModel = 'gemini-2.5-flash';
+        curChatModel = 'gemini-3.5-flash-lite';
     } else if (curChatModel && !chatList.includes(curChatModel)) {
         chatList.unshift(curChatModel);
     }
@@ -6258,7 +6285,7 @@ async function testChatConnectionFromUI() {
                 throw new Error('接口返回成功但内容为空，可能被安全策略拦截或模型未输出正文');
             }
         } else {
-            const timeoutMs = candidates.length > 1 ? 20000 : (backupModels.length > 0 ? 25000 : 30000);
+            const timeoutMs = candidates.length > 1 ? 25000 : (backupModels.length > 0 ? 35000 : 40000);
             const res = await runWithNodePolling({
                 scopeKey: 'chat',
                 candidates,
@@ -6272,7 +6299,7 @@ async function testChatConnectionFromUI() {
                 onStatus: (msg) => setInlineTestResult('cqst-cfg-chat-test-result', 'pending', `⏳ ${msg}`),
                 executeAttempt: (node, model) => callChatWithVersionFallback(node, model, {
                     userText: '请仅回复 OK',
-                    maxTokens: 128,
+                    maxTokens: 1024,
                     temperature: 0,
                     timeoutMs,
                     signal,
