@@ -761,6 +761,11 @@ html[data-cqst-theme="night"] {
     color: var(--cqst-green-text);
 }
 
+.cqst-status-pill.ok {
+    background: rgba(var(--cqst-rgb-green), 0.15);
+    color: var(--cqst-green-text);
+}
+
 .cqst-btn {
     height: 30px;
     padding: 0 11px;
@@ -946,16 +951,16 @@ html[data-cqst-theme="night"] {
 }
 
 /* 统一输入控件尺寸与圆角，彻底消除与初晴主题下划线 input[type=number] 的高低错位 */
-body input.cqst-input,
-body input[type="number"].cqst-input,
-body input[type="text"].cqst-input,
-body input[type="password"].cqst-input,
-body select.cqst-select,
-body .drawer-content input.cqst-input,
-body .drawer-content input[type="number"].cqst-input,
-body .drawer-content input[type="text"].cqst-input,
-body .drawer-content input[type="password"].cqst-input,
-body .drawer-content select.cqst-select {
+html input.cqst-input,
+html input[type="number"].cqst-input,
+html input[type="text"].cqst-input,
+html input[type="password"].cqst-input,
+html select.cqst-select,
+html .drawer-content input.cqst-input,
+html .drawer-content input[type="number"].cqst-input,
+html .drawer-content input[type="text"].cqst-input,
+html .drawer-content input[type="password"].cqst-input,
+html .drawer-content select.cqst-select {
     width: 100%;
     min-width: 0 !important;
     max-width: 100% !important;
@@ -978,16 +983,16 @@ body .drawer-content select.cqst-select {
     transition: border-color 0.18s ease, background-color 0.18s ease;
 }
 
-body input[type="number"].cqst-input,
-body .drawer-content input[type="number"].cqst-input {
+html input[type="number"].cqst-input,
+html .drawer-content input[type="number"].cqst-input {
     text-align: center !important;
     font-family: var(--cqst-font-mono) !important;
     font-weight: 700 !important;
     padding: 4px 6px !important;
 }
 
-body textarea.cqst-textarea,
-body .drawer-content textarea.cqst-textarea {
+html textarea.cqst-textarea,
+html .drawer-content textarea.cqst-textarea {
     width: 100%;
     margin: 0 !important;
     padding: 7px 10px !important;
@@ -1003,21 +1008,21 @@ body .drawer-content textarea.cqst-textarea {
     box-sizing: border-box !important;
 }
 
-body .cqst-input:focus,
-body .cqst-select:focus,
-body .cqst-textarea:focus,
-body .drawer-content .cqst-input:focus,
-body .drawer-content .cqst-select:focus,
-body .drawer-content .cqst-textarea:focus {
+html .cqst-input:focus,
+html .cqst-select:focus,
+html .cqst-textarea:focus,
+html .drawer-content .cqst-input:focus,
+html .drawer-content .cqst-select:focus,
+html .drawer-content .cqst-textarea:focus {
     outline: none !important;
     border-color: var(--cqst-brown-light) !important;
     background: var(--cqst-surface-hover) !important;
 }
 
-body .cqst-input.compact-h,
-body .cqst-select.compact-h,
-body .drawer-content .cqst-input.compact-h,
-body .drawer-content .cqst-select.compact-h {
+html .cqst-input.compact-h,
+html .cqst-select.compact-h,
+html .drawer-content .cqst-input.compact-h,
+html .drawer-content .cqst-select.compact-h {
     height: 25px !important;
     min-height: 25px !important;
     padding: 2px 7px !important;
@@ -1160,7 +1165,7 @@ input[type="checkbox"].cqst-checkbox:checked::after {
 /* 总结草稿预览区（先总结、后手动确认存入） */
 .cqst-draft-box {
     background: var(--cqst-bg-input);
-    border: 1px dashed var(--cqst-bot-border);
+    border: 1px dashed var(--cqst-blue-grey);
     border-radius: 8px;
     padding: 10px;
     display: flex;
@@ -1582,8 +1587,8 @@ input[type="checkbox"].cqst-checkbox:checked::after {
     box-sizing: border-box;
 }
 
-body textarea.cqst-textarea.cqst-node-pool-textarea,
-body .drawer-content textarea.cqst-textarea.cqst-node-pool-textarea {
+html textarea.cqst-textarea.cqst-node-pool-textarea,
+html .drawer-content textarea.cqst-textarea.cqst-node-pool-textarea {
     font-family: var(--cqst-font-mono) !important;
     font-size: 11.5px !important;
     line-height: 1.45 !important;

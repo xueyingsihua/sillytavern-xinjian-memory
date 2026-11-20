@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.15';
+const PLUGIN_VERSION = '1.0.16';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -1479,6 +1479,9 @@ async function renameCompartmentAndMigrate(oldName, newName, { deleteOld = true 
             state.stagedManualRecall.compartment = dst;
         }
     }
+    if ((deleteOld || state.currentCompartment === dst) && state.pendingDrafts?.compartment === src) {
+        state.pendingDrafts.compartment = dst;
+    }
 
     if (deleteOld) {
         const oldSha = state.branchCache[src]?.sha || null;
@@ -1951,12 +1954,40 @@ function getChatEndpointCandidates() {
     return buildEndpointCandidates({ provider: prov, rawKey, rawBase, backupBases });
 }
 
+function stripChatModelOverridesForEmbed(candidates = []) {
+    const deduped = [];
+    const seen = new Set();
+    for (const c of candidates) {
+        if (!c || !c.key || !c.base) continue;
+        const sig = `${c.provider}|${c.base}|${c.key}`;
+        if (seen.has(sig)) continue;
+        seen.add(sig);
+        deduped.push({
+            ...c,
+            modelOverride: ''
+        });
+    }
+    const hostCounts = new Map();
+    deduped.forEach(c => hostCounts.set(c.hostLabel, (hostCounts.get(c.hostLabel) || 0) + 1));
+    const hostSeen = new Map();
+    const total = deduped.length;
+    deduped.forEach((c, idx) => {
+        const countForHost = hostCounts.get(c.hostLabel) || 1;
+        const seq = (hostSeen.get(c.hostLabel) || 0) + 1;
+        hostSeen.set(c.hostLabel, seq);
+        c.label = countForHost > 1 ? `${c.hostLabel} #${seq}` : c.hostLabel;
+        c.nodeIndex = idx + 1;
+        c.nodeTotal = total;
+    });
+    return deduped;
+}
+
 function getEmbedEndpointCandidates() {
     const ep = state.config.embedProvider || 'same';
     if (ep === 'local') return [];
     if (ep === 'same') {
         if (state.config.apiProvider === 'st_current') return [];
-        return getChatEndpointCandidates();
+        return stripChatModelOverridesForEmbed(getChatEndpointCandidates());
     }
     const prof = state.config.embedProfiles?.[ep];
     const rawKey = (prof ? prof.key : state.config.embedKey) || '';
@@ -3102,6 +3133,28 @@ function syncSiblingDraftField(sourceKey, idx, fieldClass, value) {
     }
 }
 
+function formatPendingDraftsMeta(drafts) {
+    if (!drafts) return '';
+    const sec = ((drafts.elapsedMs || 0) / 1000).toFixed(1);
+    let metaText = drafts.usedAi
+        ? `📋 已总结 ${drafts.items.length} 条 · ${sec}s（${drafts.providerLabel}）`
+        : `📋 待存入草稿 ${drafts.items.length} 条（${drafts.providerLabel}）`;
+    if (drafts.compartment && drafts.compartment !== state.currentCompartment) {
+        metaText += ` · ⚠️ 原属 [${drafts.compartment}]`;
+    }
+    return metaText;
+}
+
+function refreshPendingDraftsMetaUI() {
+    const drafts = state.pendingDrafts;
+    if (!drafts || !Array.isArray(drafts.items) || drafts.items.length === 0) return;
+    const metaText = formatPendingDraftsMeta(drafts);
+    getDraftBoxPairs().forEach(({ metaId }) => {
+        const meta = document.getElementById(metaId);
+        if (meta) meta.textContent = metaText;
+    });
+}
+
 function renderPendingDraftsUI() {
     const drafts = state.pendingDrafts;
     const pairs = getDraftBoxPairs();
@@ -3116,10 +3169,7 @@ function renderPendingDraftsUI() {
         return;
     }
 
-    const sec = ((drafts.elapsedMs || 0) / 1000).toFixed(1);
-    const metaText = drafts.usedAi
-        ? `📋 已总结 ${drafts.items.length} 条 · ${sec}s（${drafts.providerLabel}）`
-        : `📋 待存入草稿 ${drafts.items.length} 条（${drafts.providerLabel}）`;
+    const metaText = formatPendingDraftsMeta(drafts);
 
     pairs.forEach(({ key, boxId, metaId, listId, compact }) => {
         const box = document.getElementById(boxId);
@@ -3196,6 +3246,7 @@ async function runSummarizeOnlyFlow({ rawText, useAiSummary = true, tags = [], s
         return null;
     }
 
+    const originCompartment = state.currentCompartment;
     const abortController = new AbortController();
     showLoading(
         useAiSummary ? 'SUMMARIZING' : 'PREPARING DRAFT',
@@ -3215,6 +3266,7 @@ async function runSummarizeOnlyFlow({ rawText, useAiSummary = true, tags = [], s
 
         state.pendingDrafts = {
             source,
+            compartment: originCompartment,
             createdAt: Date.now(),
             elapsedMs: res.elapsedMs,
             providerLabel: res.providerLabel,
@@ -3250,6 +3302,12 @@ async function commitPendingDraftsFlow() {
     if (!state.pendingDrafts?.items?.length) {
         showToast('暂无待存入草稿', '请先点击「📝 先总结预览」生成草稿', 'warn');
         return null;
+    }
+
+    const originComp = state.pendingDrafts.compartment;
+    if (originComp && originComp !== state.currentCompartment) {
+        const ok = confirm(`当前草稿生成于隔间「${originComp}」，确定要存入当前隔间「${state.currentCompartment}」吗？`);
+        if (!ok) return null;
     }
 
     const abortController = new AbortController();
@@ -5489,6 +5547,7 @@ function renderAllUI() {
     renderTagPickers();
     renderDrawerSlices();
     renderRecallPreview();
+    refreshPendingDraftsMetaUI();
     if (state.panelOpen) updateMiniPanelPosition();
 }
 
@@ -6371,7 +6430,8 @@ async function testEmbedConnectionFromUI() {
     const selectModel = document.getElementById('cqst-cfg-embed-model')?.value || '';
     const rawPicked = customModel || selectModel || '';
 
-    const candidates = buildEndpointCandidates({ provider: effProv, rawKey, rawBase, backupBases });
+    const rawCandidates = buildEndpointCandidates({ provider: effProv, rawKey, rawBase, backupBases });
+    const candidates = embProv === 'same' ? stripChatModelOverridesForEmbed(rawCandidates) : rawCandidates;
     if (candidates.length === 0) {
         const msg = '❌ 请先填写对应的向量 API Key';
         setInlineTestResult('cqst-cfg-embed-test-result', 'err', msg);
