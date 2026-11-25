@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.19';
+const PLUGIN_VERSION = '1.0.20';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -207,6 +207,7 @@ const state = {
     stagedManualRecall: null, // { query, compartment, recalled, formattedBlock, chatLen }
     lastArchivedFloorMap: {}, // { [rawChatId]: lastArchivedFloorIndex }
     lastScrapedRange: null, // { chatId, startFloor, endFloor, floorCount }
+    lastScrapeEmptyReason: '',
     turnCounter: 0,
     lastCountedMesIndex: -1,
     isAutoArchiving: false,
@@ -2654,7 +2655,73 @@ async function callSummaryModel(rawText, { signal = null, onProgress = null } = 
 /* ============================================================================
    8. 酒馆对话抓取与深度层 Prompt 挂载拦截器 (@D0 默认直注，不污染输入框)
    ============================================================================ */
-function scrapeSillyTavernChat({ mode = 'recent', turns = 5, startFloor = 0, endFloor = 9999, preset = null } = {}) {
+function getEffectiveArchivedFloor(rawChatId = state.currentChatIdentity.rawChatId) {
+    if (!rawChatId) return undefined;
+    const mapped = state.lastArchivedFloorMap?.[rawChatId];
+    if (mapped === -1) return undefined;
+    if (Number.isFinite(mapped) && mapped >= 0) return mapped;
+    const slices = getCachedSlices(state.currentCompartment);
+    let maxEnd = -1;
+    for (const s of slices) {
+        const f = Number(s?.floorEnd);
+        if (Number.isFinite(f) && s?.sourceChatId === rawChatId && f > maxEnd) {
+            maxEnd = f;
+        }
+    }
+    return maxEnd >= 0 ? maxEnd : undefined;
+}
+
+function reconcileArchivedFloorAfterDelete(deletedSlices, remainingSlices) {
+    const rawChatId = state.currentChatIdentity.rawChatId;
+    if (!rawChatId) return;
+    const prev = state.lastArchivedFloorMap?.[rawChatId];
+    if (!Array.isArray(remainingSlices) || remainingSlices.length === 0) {
+        if (rawChatId in (state.lastArchivedFloorMap || {})) {
+            delete state.lastArchivedFloorMap[rawChatId];
+            saveSettings();
+        }
+        return;
+    }
+    const deletedMax = (deletedSlices || []).reduce((mx, s) => {
+        const f = Number(s?.floorEnd);
+        if (Number.isFinite(f) && (!s.sourceChatId || s.sourceChatId === rawChatId)) {
+            return Math.max(mx, f);
+        }
+        return mx;
+    }, -1);
+    if (Number.isFinite(prev) && prev >= 0 && deletedMax >= prev) {
+        const remMax = remainingSlices.reduce((mx, s) => {
+            const f = Number(s?.floorEnd);
+            if (Number.isFinite(f) && (!s.sourceChatId || s.sourceChatId === rawChatId)) {
+                return Math.max(mx, f);
+            }
+            return mx;
+        }, -1);
+        if (remMax >= 0) {
+            state.lastArchivedFloorMap[rawChatId] = remMax;
+        } else {
+            delete state.lastArchivedFloorMap[rawChatId];
+        }
+        saveSettings();
+    }
+}
+
+function showEmptyScrapeToast(defaultMsg = '请确认当前酒馆已打开角色对话') {
+    if (state.lastScrapeEmptyReason === 'all_archived') {
+        const lastFloor = getEffectiveArchivedFloor();
+        showToast(
+            '暂无未归档新楼层',
+            `当前已记至 #${Number.isFinite(lastFloor) ? lastFloor : 0} 楼（若与实际不符，可点「✏️ 校准楼层」改回正确楼层）`,
+            'info',
+            4500
+        );
+        return;
+    }
+    showToast('未提取到对话', defaultMsg, 'warn');
+}
+
+function scrapeSillyTavernChat({ mode = 'recent', turns = 5, startFloor = 0, endFloor = 9999, preset = null, fallbackToRecentWhenUntracked = false } = {}) {
+    state.lastScrapeEmptyReason = '';
     const ctx = getSTContext();
     const chatArr = Array.isArray(ctx?.chat) ? ctx.chat : [];
     const activePreset = preset || getActiveScrapePreset();
@@ -2671,12 +2738,18 @@ function scrapeSillyTavernChat({ mode = 'recent', turns = 5, startFloor = 0, end
             const e = Math.max(s, Math.min(chatArr.length - 1, Number(endFloor) || chatArr.length - 1));
             selected = indexedMsgs.filter(({ idx }) => idx >= s && idx <= e);
         } else if (mode === 'unarchived') {
-            const lastFloor = rawChatId ? state.lastArchivedFloorMap?.[rawChatId] : undefined;
+            const lastFloor = getEffectiveArchivedFloor(rawChatId);
             if (Number.isFinite(lastFloor)) {
                 selected = indexedMsgs.filter(({ idx }) => idx > lastFloor);
-            }
-            if (selected.length === 0) {
-                selected = indexedMsgs.slice(-Math.max(1, turns * 2));
+                if (selected.length === 0) {
+                    state.lastScrapeEmptyReason = 'all_archived';
+                    state.lastScrapedRange = null;
+                    return '';
+                }
+            } else {
+                selected = fallbackToRecentWhenUntracked
+                    ? indexedMsgs.slice(-Math.max(1, turns * 2))
+                    : indexedMsgs;
             }
         } else {
             selected = indexedMsgs.slice(-Math.max(1, turns * 2));
@@ -3118,7 +3191,7 @@ async function saveDraftSlicesToCompartment(draftItems, { signal = null, onStage
 
     if (rawChatId && activeRange && activeRange.chatId === rawChatId && Number.isFinite(activeRange.endFloor)) {
         const prev = state.lastArchivedFloorMap[rawChatId];
-        state.lastArchivedFloorMap[rawChatId] = Number.isFinite(prev)
+        state.lastArchivedFloorMap[rawChatId] = (Number.isFinite(prev) && prev >= 0)
             ? Math.max(prev, activeRange.endFloor)
             : activeRange.endFloor;
     }
@@ -3787,6 +3860,10 @@ function buildTopDrawerContentHTML() {
                             </select>
                             <button type="button" class="cqst-btn sm" id="cqst-top-btn-scrape">🔍 抓取</button>
                         </div>
+                    </div>
+                    <div class="cqst-row-wrap" style="font-size:11.5px;color:var(--cqst-text-faded);margin-top:-2px;">
+                        <span id="cqst-top-archived-floor-status">📍 归档进度：暂无记录</span>
+                        <button type="button" class="cqst-link-btn" id="cqst-btn-calibrate-floor" title="手动设置或重置「未归档新楼层」的起始楼层进度">✏️ 校准楼层</button>
                     </div>
                     <div class="cqst-row" style="gap:6px;">
                         <select id="cqst-scrape-preset-select" class="cqst-select compact-h" style="flex:1;" title="选择当前使用的抓取与正文清洗规则预设"></select>
@@ -5070,13 +5147,16 @@ async function handleBatchDeleteSelectedSlices() {
     const abortController = new AbortController();
     showLoading('DELETING', `正在批量删除 ${idsToDelete.size} 条记忆切片...`, { abortController });
     try {
-        const next = getCachedSlices(state.currentCompartment).filter(item => !idsToDelete.has(item.id));
+        const current = getCachedSlices(state.currentCompartment);
+        const deleted = current.filter(item => idsToDelete.has(item.id));
+        const next = current.filter(item => !idsToDelete.has(item.id));
         await saveCompartment(
             state.currentCompartment,
             next,
             `Batch delete ${idsToDelete.size} memory slice(s)`,
             { signal: abortController.signal, onStage: (scene, msg) => updateLoading(scene, msg) }
         );
+        reconcileArchivedFloorAfterDelete(deleted, next);
         state.selectedSliceIds.clear();
         state.batchDeleteMode = false;
         renderAllUI();
@@ -5195,6 +5275,7 @@ function renderDrawerSlices() {
             state.selectedSliceIds.delete(s.id);
             const next = getCachedSlices(state.currentCompartment).filter(item => item.id !== s.id);
             await saveCompartment(state.currentCompartment, next, 'Delete memory slice');
+            reconcileArchivedFloorAfterDelete([s], next);
             renderAllUI();
             showToast('已删除记忆', `隔间 [${state.currentCompartment}] 剩余 ${next.length} 条`, 'info');
         });
@@ -5605,6 +5686,24 @@ function renderAllUI() {
     if (topChatHint) {
         const raw = state.currentChatIdentity.rawChatId;
         topChatHint.textContent = raw ? `当前聊天分支：${raw}` : '当前未激活角色对话（使用默认隔间）';
+    }
+    const archivedStatusEl = document.getElementById('cqst-top-archived-floor-status');
+    if (archivedStatusEl) {
+        const raw = state.currentChatIdentity.rawChatId;
+        if (!raw) {
+            archivedStatusEl.textContent = '📍 归档进度：未打开角色对话';
+        } else {
+            const ctx = getSTContext();
+            const chatArr = Array.isArray(ctx?.chat) ? ctx.chat : [];
+            const nonSys = chatArr.map((m, idx) => ({ m, idx })).filter(({ m }) => m && !m.is_system);
+            const effFloor = getEffectiveArchivedFloor(raw);
+            if (Number.isFinite(effFloor)) {
+                const unarchivedCnt = nonSys.filter(({ idx }) => idx > effFloor).length;
+                archivedStatusEl.textContent = `📍 已记至 #${effFloor} 楼 · 未归档 ${unarchivedCnt} 楼`;
+            } else {
+                archivedStatusEl.textContent = `📍 归档进度：未记录 · 共 ${nonSys.length} 楼待归档`;
+            }
+        }
     }
 
     const topAutoInj = document.getElementById('cqst-top-chk-autoinject');
@@ -6727,7 +6826,7 @@ function bindBaseUIEvents() {
     document.getElementById('cqst-mini-scrape-btn').addEventListener('click', () => {
         const scraped = scrapeMiniChatByUI();
         if (!scraped) {
-            showToast('未提取到对话', '请确认当前酒馆已打开对话且存在有效楼层', 'warn');
+            showEmptyScrapeToast('请确认当前酒馆已打开对话且存在有效楼层');
             return;
         }
         document.getElementById('cqst-mini-archive-text').value = scraped;
@@ -6743,6 +6842,10 @@ function bindBaseUIEvents() {
         let raw = document.getElementById('cqst-mini-archive-text').value.trim();
         if (!raw) {
             raw = scrapeMiniChatByUI();
+            if (!raw && state.lastScrapeEmptyReason === 'all_archived') {
+                showEmptyScrapeToast();
+                return;
+            }
             document.getElementById('cqst-mini-archive-text').value = raw;
             updateArchiveCharCounters();
         }
@@ -7013,7 +7116,7 @@ function bindTopDrawerEvents() {
     document.getElementById('cqst-top-btn-scrape').addEventListener('click', () => {
         const scraped = scrapeTopChatByUI();
         if (!scraped) {
-            showToast('未提取到对话', '请确认当前酒馆已打开角色对话', 'warn');
+            showEmptyScrapeToast('请确认当前酒馆已打开角色对话');
             return;
         }
         document.getElementById('cqst-top-archive-preview').value = scraped;
@@ -7021,6 +7124,40 @@ function bindTopDrawerEvents() {
         const r = state.lastScrapedRange;
         const rangeInfo = r ? `第 ${r.startFloor}~${r.endFloor} 层（共 ${r.floorCount} 楼）· ` : '';
         showToast('已提取对话', `${rangeInfo}共 ${scraped.length} 字，可直接点「📝 先总结预览」或「⚡ 一键归档」`, 'info');
+    });
+
+    document.getElementById('cqst-btn-calibrate-floor')?.addEventListener('click', () => {
+        const rawChatId = state.currentChatIdentity.rawChatId || getCurrentChatIdentity(getSTContext()).rawChatId || '';
+        if (!rawChatId) {
+            showToast('未打开角色对话', '请先进入某个角色聊天再校准楼层进度', 'warn');
+            return;
+        }
+        const effFloor = getEffectiveArchivedFloor(rawChatId);
+        const curVal = Number.isFinite(effFloor) ? String(effFloor) : '';
+        const input = prompt(
+            '设置当前对话「已归档至第几楼」（0 起算）：\n' +
+            '· 例如实际只总结到第 12 楼，输入 12，下次选「未归档新楼层」就会从第 13 楼开始抓。\n' +
+            '· 留空或输入 -1 表示重置记录，下次从第 0 楼起抓。',
+            curVal
+        );
+        if (input === null) return;
+        const trimmed = input.trim();
+        if (!trimmed || Number(trimmed) < 0) {
+            state.lastArchivedFloorMap[rawChatId] = -1;
+            saveSettings();
+            renderAllUI();
+            showToast('已重置归档进度', '下次「未归档新楼层」将从第 0 楼起抓', 'info');
+            return;
+        }
+        const parsed = parseInt(trimmed, 10);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+            showToast('楼层格式无效', '请输入 0 或正整数，或留空/-1 重置', 'warn');
+            return;
+        }
+        state.lastArchivedFloorMap[rawChatId] = parsed;
+        saveSettings();
+        renderAllUI();
+        showToast('归档进度已校准', `已设为已归档至 #${parsed} 楼，下次将从 #${parsed + 1} 楼起抓`, 'ok');
     });
 
     document.getElementById('cqst-top-archive-preview').addEventListener('input', updateArchiveCharCounters);
@@ -7044,6 +7181,10 @@ function bindTopDrawerEvents() {
         let raw = document.getElementById('cqst-top-archive-preview').value.trim();
         if (!raw) {
             raw = scrapeTopChatByUI();
+            if (!raw && state.lastScrapeEmptyReason === 'all_archived') {
+                showEmptyScrapeToast();
+                return;
+            }
             document.getElementById('cqst-top-archive-preview').value = raw;
             updateArchiveCharCounters();
         }
@@ -7063,6 +7204,10 @@ function bindTopDrawerEvents() {
         let raw = document.getElementById('cqst-top-archive-preview').value.trim();
         if (!raw) {
             raw = scrapeTopChatByUI();
+            if (!raw && state.lastScrapeEmptyReason === 'all_archived') {
+                showEmptyScrapeToast();
+                return;
+            }
             document.getElementById('cqst-top-archive-preview').value = raw;
             updateArchiveCharCounters();
         }
@@ -7730,7 +7875,7 @@ async function onCharacterMessageRendered(messageId) {
     state.turnCounter = 0;
     state.isAutoArchiving = true;
     try {
-        const rawText = scrapeSillyTavernChat({ mode: 'unarchived', turns: targetTurns });
+        const rawText = scrapeSillyTavernChat({ mode: 'unarchived', turns: targetTurns, fallbackToRecentWhenUntracked: true });
         if (rawText) {
             await archiveMemorySlice({
                 rawText,
