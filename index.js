@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.16';
+const PLUGIN_VERSION = '1.0.17';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -2669,22 +2669,20 @@ function getEffectivePersona() {
 }
 
 function formatRecallPromptBlock(compartmentName, recalled, { includePersona = true } = {}) {
-    const lines = [];
-    lines.push(`【✉️ 信笺 · 长期记忆档案 (${compartmentName})】`);
+    const blocks = [];
     const effPersona = includePersona ? getEffectivePersona() : '';
     if (effPersona) {
-        lines.push(`▸ 隔间核心设定：\n${effPersona}`);
+        blocks.push(effPersona);
     }
     if (recalled && recalled.length > 0) {
-        lines.push('▸ 唤醒的过往记忆切片（按向量余弦相似度召回）：');
-        recalled.forEach((r, i) => {
-            const pct = (r.score * 100).toFixed(0) + '%';
-            const tagStr = (r.slice.tags || []).map(t => `#${t}`).join(' ');
-            lines.push(`${i + 1}. [${r.slice.date || '过往'} | ${r.slice.event || '记忆'} | ${tagStr} | 相关度 ${pct}]: ${r.slice.text}`);
-        });
+        const sliceTexts = recalled
+            .map(r => String(r?.slice?.text || '').trim())
+            .filter(Boolean);
+        if (sliceTexts.length > 0) {
+            blocks.push(sliceTexts.join('\n\n'));
+        }
     }
-    lines.push('---');
-    return lines.join('\n');
+    return blocks.join('\n\n');
 }
 
 function getSTInputDraft() {
@@ -2709,6 +2707,10 @@ function mountRecallToDepthLayer(recalled, { query = '', isManual = false } = {}
         return '';
     }
     const block = formatRecallPromptBlock(state.currentCompartment, recalled, { includePersona: true });
+    if (!block) {
+        clearExtensionPromptSafe(ctx);
+        return '';
+    }
     const pos = parseIntInRange(state.config.injectPosition, 0, 2, 1);
     const depth = parseIntInRange(state.config.injectDepth, 0, 99, 0);
     const role = parseIntInRange(state.config.injectRole, 0, 2, 0);
