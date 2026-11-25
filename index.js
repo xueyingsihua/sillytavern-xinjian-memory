@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.17';
+const PLUGIN_VERSION = '1.0.18';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -108,7 +108,7 @@ const DEFAULT_SCRAPE_PRESETS = [
         name: '默认：只抓 <content> 正文 + 清洗自检注释',
         extractTags: ['content'],
         fallbackWhenNoTag: true,
-        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'summary'],
+        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'summary', 'memory'],
         cleanComments: true,
         keepCommentKeywords: ''
     },
@@ -117,7 +117,7 @@ const DEFAULT_SCRAPE_PRESETS = [
         name: '全文模式：不限标签 + 仅洗思维链与自检注释',
         extractTags: [],
         fallbackWhenNoTag: true,
-        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options'],
+        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'memory'],
         cleanComments: true,
         keepCommentKeywords: ''
     }
@@ -2682,7 +2682,8 @@ function formatRecallPromptBlock(compartmentName, recalled, { includePersona = t
             blocks.push(sliceTexts.join('\n\n'));
         }
     }
-    return blocks.join('\n\n');
+    const body = blocks.join('\n\n');
+    return body ? `<memory>\n${body}\n</memory>` : '';
 }
 
 function getSTInputDraft() {
