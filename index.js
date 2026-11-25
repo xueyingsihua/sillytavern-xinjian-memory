@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.18';
+const PLUGIN_VERSION = '1.0.19';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -108,7 +108,7 @@ const DEFAULT_SCRAPE_PRESETS = [
         name: '默认：只抓 <content> 正文 + 清洗自检注释',
         extractTags: ['content'],
         fallbackWhenNoTag: true,
-        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'summary', 'memory'],
+        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'summary', 'xinjian_memory'],
         cleanComments: true,
         keepCommentKeywords: ''
     },
@@ -117,7 +117,7 @@ const DEFAULT_SCRAPE_PRESETS = [
         name: '全文模式：不限标签 + 仅洗思维链与自检注释',
         extractTags: [],
         fallbackWhenNoTag: true,
-        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'memory'],
+        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'xinjian_memory'],
         cleanComments: true,
         keepCommentKeywords: ''
     }
@@ -160,6 +160,7 @@ const DEFAULT_CONFIG = {
     topK: 5,
     minScore: 0.38,
     recallScanFloors: 4,
+    recallExcludeRecentFloors: 0, // 0=不排除；N>0=跳过最近 N 楼内归档的切片，只召回 N 楼之外的记忆
     autoInjectEnabled: true,
     injectPosition: 1, // 0: IN_PROMPT, 1: IN_CHAT (@depth), 2: BEFORE_PROMPT
     injectDepth: 0, // 默认 @D0 注入，保证前缀 KV Cache 稳定
@@ -312,7 +313,8 @@ function cleanMessageText(raw = '', customPreset = null) {
         .map(s => s.trim().toLowerCase())
         .filter(Boolean);
 
-    // 1. 先剔除思维链、状态栏、小剧场等干扰组件块
+    // 1. 先剔除本扩展召回标记及思维链、状态栏、小剧场等干扰组件块
+    text = text.replace(/<xinjian_memory(?:\s[^>]*)?>[\s\S]*?<\/xinjian_memory>/gi, '');
     for (const tag of stripTags) {
         const esc = escapeRegex(tag);
         text = text.replace(new RegExp(`<${esc}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${esc}>`, 'gi'), '');
@@ -757,6 +759,7 @@ function loadSettings() {
             state.config.injectPosition = parseIntInRange(state.config.injectPosition, 0, 2, 1);
             state.config.injectRole = parseIntInRange(state.config.injectRole, 0, 2, 0);
             state.config.recallScanFloors = parseIntInRange(state.config.recallScanFloors, 1, 12, 4);
+            state.config.recallExcludeRecentFloors = parseIntInRange(state.config.recallExcludeRecentFloors, 0, 500, 0);
             state.config.autoTurns = parseIntInRange(state.config.autoTurns, 1, 50, 5);
             state.config.themeMode = state.config.themeMode === 'night' ? 'night' : 'day';
             if (!state.config.summaryPrompt || !String(state.config.summaryPrompt).trim()
@@ -2210,11 +2213,58 @@ async function rerankCandidates(queryText, coarseItems, topK, threshold) {
     return null;
 }
 
-async function retrieveTopKMemories(queryText, filterTag = '', topK = state.config.topK, minScore = state.config.minScore) {
+function computeRecentFloorCutoff(chatList, excludeFloors) {
+    const n = parseIntInRange(excludeFloors, 0, 500, 0);
+    if (n <= 0 || !Array.isArray(chatList) || chatList.length === 0) return null;
+    const indexedMsgs = chatList
+        .map((m, idx) => ({ m, idx }))
+        .filter(({ m }) => m && !m.is_system);
+    if (indexedMsgs.length === 0) return null;
+    const latestFloor = indexedMsgs[indexedMsgs.length - 1].idx;
+    if (indexedMsgs.length <= n) {
+        return { cutoffFloor: indexedMsgs[0].idx, latestFloor, excludeCount: n };
+    }
+    const cutoffFloor = indexedMsgs[indexedMsgs.length - n].idx;
+    return { cutoffFloor, latestFloor, excludeCount: n };
+}
+
+function filterSlicesOutsideRecentFloors(
+    slices,
+    { chatList = null, excludeFloors = state.config.recallExcludeRecentFloors, currentChatId = '' } = {}
+) {
+    const list = Array.isArray(slices) ? slices : [];
+    const n = parseIntInRange(excludeFloors, 0, 500, 0);
+    if (n <= 0 || list.length === 0) return list;
+    const ctx = getSTContext();
+    const effectiveChat = Array.isArray(chatList) && chatList.length
+        ? chatList
+        : (Array.isArray(ctx?.chat) ? ctx.chat : []);
+    const cutoff = computeRecentFloorCutoff(effectiveChat, n);
+    if (!cutoff) return list;
+    const curChatId = currentChatId || state.currentChatIdentity?.rawChatId || '';
+
+    return list.filter(slice => {
+        const endFloor = Number(slice?.floorEnd);
+        if (!Number.isFinite(endFloor)) return true;
+        const sChatId = slice?.sourceChatId || '';
+        if (sChatId && curChatId && sChatId !== curChatId) return true;
+        if (endFloor > cutoff.latestFloor) return true;
+        return endFloor < cutoff.cutoffFloor;
+    });
+}
+
+async function retrieveTopKMemories(
+    queryText,
+    filterTag = '',
+    topK = state.config.topK,
+    minScore = state.config.minScore,
+    { chatList = null, excludeRecentFloors = state.config.recallExcludeRecentFloors } = {}
+) {
     let candidates = getCachedSlices(state.currentCompartment);
     if (filterTag) {
         candidates = candidates.filter(s => Array.isArray(s.tags) && s.tags.includes(filterTag));
     }
+    candidates = filterSlicesOutsideRecentFloors(candidates, { chatList, excludeFloors: excludeRecentFloors });
     if (candidates.length === 0) return [];
 
     const queryVec = await getEmbeddingVector(queryText);
@@ -2683,7 +2733,7 @@ function formatRecallPromptBlock(compartmentName, recalled, { includePersona = t
         }
     }
     const body = blocks.join('\n\n');
-    return body ? `<memory>\n${body}\n</memory>` : '';
+    return body ? `<xinjian_memory>\n${body}\n</xinjian_memory>` : '';
 }
 
 function getSTInputDraft() {
@@ -2790,11 +2840,13 @@ async function runManualRecallMount(customQuery = '') {
         : [];
 
     if (!recalled.length && !effPersona) {
+        const excludeFloors = parseIntInRange(state.config.recallExcludeRecentFloors, 0, 500, 0);
+        const excludeHint = excludeFloors > 0 ? `（已屏蔽最近 ${excludeFloors} 楼内记忆）` : '';
         showToast(
             '未命中相关记忆',
-            typedQ
+            (typedQ
                 ? `关键词未命中（阈值 ${(minScore * 100).toFixed(0)}%）`
-                : `已扫描最近 ${scanFloors} 楼正文，相关度均低于 ${(minScore * 100).toFixed(0)}%`,
+                : `已扫描最近 ${scanFloors} 楼正文，相关度均低于 ${(minScore * 100).toFixed(0)}%`) + excludeHint,
             'warn'
         );
         return;
@@ -2860,7 +2912,7 @@ async function chuqingMemoryInterceptor(chat, _contextSize, _abort, type) {
 
     try {
         const recalled = slices.length > 0
-            ? await retrieveTopKMemories(query, state.activeTagFilter, state.config.topK, state.config.minScore)
+            ? await retrieveTopKMemories(query, state.activeTagFilter, state.config.topK, state.config.minScore, { chatList })
             : [];
 
         if (recalled.length === 0 && !effPersona) {
@@ -2962,20 +3014,26 @@ async function summarizeToDraftSlices({ rawText, useAiSummary = true, tags = [],
     };
 }
 
-async function saveDraftSlicesToCompartment(draftItems, { signal = null, onStage = null, newTagsToAdd = [] } = {}) {
+async function saveDraftSlicesToCompartment(draftItems, { signal = null, onStage = null, newTagsToAdd = [], scrapedRange = undefined } = {}) {
+    const activeRange = scrapedRange !== undefined ? scrapedRange : state.lastScrapedRange;
+    const rawChatId = state.currentChatIdentity.rawChatId;
     const validItems = (Array.isArray(draftItems) ? draftItems : [])
         .map(item => {
             const rawTags = Array.isArray(item?.tags)
                 ? item.tags
                 : String(item?.tags || '').split(/[,，、]+/);
             const cleanTags = Array.from(new Set(rawTags.map(t => String(t || '').trim().replace(/^#+/, '')).filter(Boolean)));
-            return {
+            const out = {
                 id: item?.id || generateUUID(),
                 text: String(item?.text || '').trim(),
                 date: String(item?.date || '').trim() || getTodayDate(),
                 event: String(item?.event || '').trim() || '剧情归档',
                 tags: cleanTags.length ? cleanTags : ['日常点滴']
             };
+            if (Number.isFinite(Number(item?.floorStart))) out.floorStart = Number(item.floorStart);
+            if (Number.isFinite(Number(item?.floorEnd))) out.floorEnd = Number(item.floorEnd);
+            if (typeof item?.sourceChatId === 'string' && item.sourceChatId) out.sourceChatId = item.sourceChatId;
+            return out;
         })
         .filter(item => item.text.length > 0);
 
@@ -3013,14 +3071,38 @@ async function saveDraftSlicesToCompartment(draftItems, { signal = null, onStage
                 lastFallbackErr = reason || '向量接口异常';
             }
         });
-        createdSlices.push({
+        const nextSlice = {
             id: item.id,
             text: item.text,
             date: item.date,
             tags: item.tags,
             event: item.event,
             vector: vec
-        });
+        };
+        if (activeRange && Number.isFinite(activeRange.startFloor) && Number.isFinite(activeRange.endFloor)) {
+            const rStart = activeRange.startFloor;
+            const rEnd = activeRange.endFloor;
+            const span = Math.max(0, rEnd - rStart);
+            const count = validItems.length;
+            if (count === 1 || span < count) {
+                nextSlice.floorStart = rStart;
+                nextSlice.floorEnd = rEnd;
+            } else {
+                const fStart = rStart + Math.floor((i * (span + 1)) / count);
+                const fEnd = (i === count - 1)
+                    ? rEnd
+                    : Math.max(fStart, rStart + Math.floor(((i + 1) * (span + 1)) / count) - 1);
+                nextSlice.floorStart = fStart;
+                nextSlice.floorEnd = fEnd;
+            }
+            const srcChat = activeRange.chatId || rawChatId;
+            if (srcChat) nextSlice.sourceChatId = srcChat;
+        } else {
+            if (Number.isFinite(item.floorStart)) nextSlice.floorStart = item.floorStart;
+            if (Number.isFinite(item.floorEnd)) nextSlice.floorEnd = item.floorEnd;
+            if (item.sourceChatId) nextSlice.sourceChatId = item.sourceChatId;
+        }
+        createdSlices.push(nextSlice);
     }
     const embedMs = Math.round(performance.now() - embedT0);
 
@@ -3034,12 +3116,11 @@ async function saveDraftSlicesToCompartment(draftItems, { signal = null, onStage
     );
     const saveMs = Math.round(performance.now() - saveT0);
 
-    const rawChatId = state.currentChatIdentity.rawChatId;
-    if (rawChatId && state.lastScrapedRange && state.lastScrapedRange.chatId === rawChatId) {
+    if (rawChatId && activeRange && activeRange.chatId === rawChatId && Number.isFinite(activeRange.endFloor)) {
         const prev = state.lastArchivedFloorMap[rawChatId];
         state.lastArchivedFloorMap[rawChatId] = Number.isFinite(prev)
-            ? Math.max(prev, state.lastScrapedRange.endFloor)
-            : state.lastScrapedRange.endFloor;
+            ? Math.max(prev, activeRange.endFloor)
+            : activeRange.endFloor;
     }
     state.lastScrapedRange = null;
     state.turnCounter = 0;
@@ -3250,6 +3331,7 @@ async function runSummarizeOnlyFlow({ rawText, useAiSummary = true, tags = [], s
     }
 
     const originCompartment = state.currentCompartment;
+    const originScrapedRange = state.lastScrapedRange ? { ...state.lastScrapedRange } : null;
     const abortController = new AbortController();
     showLoading(
         useAiSummary ? 'SUMMARIZING' : 'PREPARING DRAFT',
@@ -3270,6 +3352,7 @@ async function runSummarizeOnlyFlow({ rawText, useAiSummary = true, tags = [], s
         state.pendingDrafts = {
             source,
             compartment: originCompartment,
+            scrapedRange: originScrapedRange,
             createdAt: Date.now(),
             elapsedMs: res.elapsedMs,
             providerLabel: res.providerLabel,
@@ -3320,6 +3403,7 @@ async function commitPendingDraftsFlow() {
         const saved = await saveDraftSlicesToCompartment(state.pendingDrafts.items, {
             signal: abortController.signal,
             newTagsToAdd: state.pendingDrafts.newTagsToAdd || [],
+            scrapedRange: state.pendingDrafts.scrapedRange || null,
             onStage: (scene, msg) => {
                 const prefix = scene === 'EMBEDDING' ? '[1/2] ' : '[2/2] ';
                 updateLoading(scene, `${prefix}${msg}`);
@@ -4112,6 +4196,11 @@ function buildTopDrawerContentHTML() {
                                 </div>
                             </div>
                         </div>
+                        <div class="cqst-form-group">
+                            <label class="cqst-form-label">屏蔽最近几楼的记忆（只召回 N 楼之外，0 = 不屏蔽）</label>
+                            <input type="number" id="cqst-cfg-exclude-recent-floors" class="cqst-input" min="0" max="500" value="0" title="例如预设保留最近 10 楼正文，填 10 即可跳过这 10 楼内归档的切片，避免重复提示（0 表示不限制）">
+                            <span class="cqst-form-hint">💡 若预设会保留最近 N 楼正文，可在此填 N，只召回 N 楼之外的过往记忆，避免与当前正文重复（对带楼层记录的新归档切片生效；手动新增与早期旧切片不受影响）。</span>
+                        </div>
                         <div class="cqst-row-wrap" style="margin-top:2px;">
                             <label style="font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
                                 <input type="checkbox" class="cqst-checkbox" id="cqst-cfg-recall-toast">
@@ -4731,12 +4820,14 @@ function renderRecallPreview() {
     const mountStatus = document.getElementById('cqst-top-mount-status');
     if (mountStatus) {
         const scanFloors = parseIntInRange(state.config.recallScanFloors, 1, 12, 4);
+        const exclFloors = parseIntInRange(state.config.recallExcludeRecentFloors, 0, 500, 0);
+        const exclNote = exclFloors > 0 ? `（跳过最近 ${exclFloors} 楼）` : '';
         if (isManual) {
             mountStatus.textContent = `📌 已半自动挂载 ${slices.length} 条记忆到 [${depthLabel}]，发消息时随提示词发送（点「✕ 清除」可取消）。`;
         } else if (slices && slices.length > 0) {
-            mountStatus.textContent = `✨ 最近一次已扫描最近 ${scanFloors} 楼正文并注入 ${slices.length} 条记忆到 [${depthLabel}]。`;
+            mountStatus.textContent = `✨ 最近一次已扫描最近 ${scanFloors} 楼正文并注入 ${slices.length} 条记忆到 [${depthLabel}]${exclNote}。`;
         } else {
-            mountStatus.textContent = `半自动说明：${state.config.autoInjectEnabled ? `发消息自动扫描最近 ${scanFloors} 楼正文注入 [${depthLabel}]` : '已关闭自动注入'}；下方留空直接点「🔮 唤醒挂载」也会自动扫最近 ${scanFloors} 楼。`;
+            mountStatus.textContent = `半自动说明：${state.config.autoInjectEnabled ? `发消息自动扫描最近 ${scanFloors} 楼正文注入 [${depthLabel}]${exclNote}` : '已关闭自动注入'}；下方留空直接点「🔮 唤醒挂载」也会自动扫最近 ${scanFloors} 楼。`;
         }
     }
 
@@ -5033,11 +5124,16 @@ function renderDrawerSlices() {
         const card = document.createElement('div');
         card.className = `cqst-slice-card${isCollapsed ? ' collapsed' : ''}${state.batchDeleteMode ? ' batch-mode' : ''}${isSelected ? ' selected' : ''}`;
         const vecDim = Array.isArray(s.vector) ? s.vector.length : 0;
+        const floorBadge = Number.isFinite(Number(s.floorEnd))
+            ? (Number.isFinite(Number(s.floorStart)) && Number(s.floorStart) !== Number(s.floorEnd)
+                ? ` · #${Number(s.floorStart)}~${Number(s.floorEnd)}楼`
+                : ` · #${Number(s.floorEnd)}楼`)
+            : '';
         card.innerHTML = `
             <div class="cqst-slice-top" title="${state.batchDeleteMode ? '点击勾选 / 取消勾选此卡片' : `点击${isCollapsed ? '展开' : '折叠'}此条记忆切片`}">
                 <span class="cqst-slice-top-left">
                     ${state.batchDeleteMode ? `<input type="checkbox" class="cqst-checkbox cqst-slice-select-chk" ${isSelected ? 'checked' : ''} aria-label="选中此记忆切片">` : ''}
-                    <span>${isCollapsed ? '▸' : '▾'} 📅 ${escapeHtml(s.date || '未知日期')} · ${escapeHtml(s.event || '记忆')}</span>
+                    <span>${isCollapsed ? '▸' : '▾'} 📅 ${escapeHtml(s.date || '未知日期')} · ${escapeHtml(s.event || '记忆')}${floorBadge}</span>
                 </span>
                 <span title="向量维度">◈ VEC-${vecDim}D</span>
             </div>
@@ -6043,6 +6139,8 @@ function populateSettingsUI({ force = false } = {}) {
     document.getElementById('cqst-cfg-topk').value = String(state.config.topK ?? 5);
     document.getElementById('cqst-cfg-minscore').value = String(state.config.minScore ?? 0.38);
     document.getElementById('cqst-cfg-scan-floors').value = String(parseIntInRange(state.config.recallScanFloors, 1, 12, 4));
+    const exclEl = document.getElementById('cqst-cfg-exclude-recent-floors');
+    if (exclEl) exclEl.value = String(parseIntInRange(state.config.recallExcludeRecentFloors, 0, 500, 0));
     document.getElementById('cqst-cfg-autoturns').value = String(state.config.autoTurns ?? 5);
     document.getElementById('cqst-cfg-recall-toast').checked = Boolean(state.config.showRecallToast);
     document.getElementById('cqst-cfg-show-pill').checked = Boolean(state.config.showFloatingPill);
@@ -7089,7 +7187,11 @@ function bindTopDrawerEvents() {
                 const vector = Array.isArray(item?.vector) && item.vector.length
                     ? compactVector(item.vector)
                     : await getEmbeddingVector(`${event} ${tags.join(' ')} ${text}`);
-                existing.push({ id, text: text.trim(), date: item?.date || getTodayDate(), tags, event, vector });
+                const importedSlice = { id, text: text.trim(), date: item?.date || getTodayDate(), tags, event, vector };
+                if (Number.isFinite(Number(item?.floorStart))) importedSlice.floorStart = Number(item.floorStart);
+                if (Number.isFinite(Number(item?.floorEnd))) importedSlice.floorEnd = Number(item.floorEnd);
+                if (typeof item?.sourceChatId === 'string' && item.sourceChatId) importedSlice.sourceChatId = item.sourceChatId;
+                existing.push(importedSlice);
                 importedCount++;
             }
 
@@ -7519,6 +7621,7 @@ function bindTopDrawerEvents() {
         const minS = parseFloat(document.getElementById('cqst-cfg-minscore').value);
         state.config.minScore = Number.isFinite(minS) ? Math.min(0.95, Math.max(0, minS)) : 0.38;
         state.config.recallScanFloors = parseIntInRange(document.getElementById('cqst-cfg-scan-floors').value, 1, 12, 4);
+        state.config.recallExcludeRecentFloors = parseIntInRange(document.getElementById('cqst-cfg-exclude-recent-floors')?.value, 0, 500, 0);
         state.config.autoTurns = parseIntInRange(document.getElementById('cqst-cfg-autoturns').value, 1, 50, 5);
         state.config.showRecallToast = document.getElementById('cqst-cfg-recall-toast').checked;
         state.config.showFloatingPill = document.getElementById('cqst-cfg-show-pill').checked;
