@@ -16,7 +16,7 @@ const LS_FALLBACK_CFG = 'chuqing_st_rag_config_v1';
 const LS_FALLBACK_BRANCHES = 'chuqing_st_rag_branches_fallback_v1';
 const LS_PILL_POS = 'chuqing_st_rag_pill_pos_v1';
 const SLICE_PAGE_SIZE = 10;
-const PLUGIN_VERSION = '1.0.20';
+const PLUGIN_VERSION = '1.0.21';
 const PLUGIN_REPO = 'xueyingsihua/sillytavern-xinjian-memory';
 const PLUGIN_REMOTE_MANIFEST_URL = `https://raw.githubusercontent.com/${PLUGIN_REPO}/main/manifest.json`;
 
@@ -24,7 +24,7 @@ const DEFAULT_TAGS = ['核心设定', '日常点滴', '重要事件', '偏好习
 
 const PRESET_MODELS = {
     gemini: {
-        chat: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
+        chat: ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
         embed: ['text-embedding-004', 'gemini-embedding-001'],
         rerank: ['BAAI/bge-reranker-v2-m3']
     },
@@ -34,7 +34,7 @@ const PRESET_MODELS = {
         rerank: ['BAAI/bge-reranker-v2-m3', 'netease-youdao/bce-reranker-base_v1', 'Pro/BAAI/bge-reranker-v2-m3']
     },
     openai: {
-        chat: ['gpt-4o-mini', 'gpt-4o', 'deepseek-chat', 'deepseek-reasoner', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'],
+        chat: ['gpt-4o-mini', 'gpt-4o', 'deepseek-chat', 'deepseek-reasoner', 'gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'],
         embed: ['text-embedding-3-small', 'text-embedding-3-large', 'BAAI/bge-m3'],
         rerank: ['BAAI/bge-reranker-v2-m3']
     }
@@ -108,7 +108,7 @@ const DEFAULT_SCRAPE_PRESETS = [
         name: '默认：只抓 <content> 正文 + 清洗自检注释',
         extractTags: ['content'],
         fallbackWhenNoTag: true,
-        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'summary', 'xinjian_memory'],
+        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'summary', 'past_memories'],
         cleanComments: true,
         keepCommentKeywords: ''
     },
@@ -117,7 +117,7 @@ const DEFAULT_SCRAPE_PRESETS = [
         name: '全文模式：不限标签 + 仅洗思维链与自检注释',
         extractTags: [],
         fallbackWhenNoTag: true,
-        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'xinjian_memory'],
+        stripTags: ['think', 'thinking', 'thought', 'status', '状态栏', 'small_theater', 'theater', '小剧场', 'options', 'past_memories'],
         cleanComments: true,
         keepCommentKeywords: ''
     }
@@ -315,7 +315,7 @@ function cleanMessageText(raw = '', customPreset = null) {
         .filter(Boolean);
 
     // 1. 先剔除本扩展召回标记及思维链、状态栏、小剧场等干扰组件块
-    text = text.replace(/<xinjian_memory(?:\s[^>]*)?>[\s\S]*?<\/xinjian_memory>/gi, '');
+    text = text.replace(/<(?:past_memories|xinjian_memory)(?:\s[^>]*)?>[\s\S]*?<\/(?:past_memories|xinjian_memory)>/gi, '');
     for (const tag of stripTags) {
         const esc = escapeRegex(tag);
         text = text.replace(new RegExp(`<${esc}(?:\\s[^>]*)?>[\\s\\S]*?<\\/${esc}>`, 'gi'), '');
@@ -1750,7 +1750,7 @@ function pickOrderedCandidates(candidates, scopeKey = 'chat', mode = state.confi
 }
 
 const BUILTIN_FALLBACK_MODELS = {
-    gemini: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'],
+    gemini: ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-flash-latest'],
     siliconflow: ['Qwen/Qwen2.5-7B-Instruct', 'THUDM/glm-4-9b-chat', 'Qwen/Qwen2.5-72B-Instruct']
 };
 
@@ -2806,7 +2806,7 @@ function formatRecallPromptBlock(compartmentName, recalled, { includePersona = t
         }
     }
     const body = blocks.join('\n\n');
-    return body ? `<xinjian_memory>\n${body}\n</xinjian_memory>` : '';
+    return body ? `<past_memories>\n${body}\n</past_memories>` : '';
 }
 
 function getSTInputDraft() {
